@@ -58,7 +58,9 @@ const realHelpers = [
     'fileNameFromUrl',
     'pickDownloadFileName',
     'collectImagesFromDom',
-    'collectArchiveImages'
+    'collectArchiveImages',
+    'archiveFolderPath',
+    'dlRootProblemText'
 ].map(extractFunction).join('\n\n');
 
 const target = extractFunction('archiveDownload');
@@ -213,6 +215,31 @@ async function runFlow(options) {
     check('用例7：forceImages 时即使关闭附带图片也会下图',
         calls,
         ['Force/d.zip', 'Force/868-1.png', 'Force/868-2.png', 'Force/868-3.png']);
+}
+
+// ---------- 用例 8：目录多一层游戏名 ----------
+{
+    const { calls, result } = await runFlow({
+        directUrl: 'https://cdn.example.com/x/e.zip',
+        opts: { modTitle: 'Agave Outfit', gameName: 'Snowbreak: Containment Zone', fileName: 'e' },
+        cfg: { dlImagesWithMod: false }
+    });
+    check('用例8：目录 = <游戏名>/<Mod名>',
+        result.folder,
+        'Snowbreak_ Containment Zone/Agave Outfit');
+    check('用例8：文件路径含游戏名层',
+        calls[0],
+        'Snowbreak_ Containment Zone/Agave Outfit/e.zip');
+}
+
+// ---------- 用例 9：拿不到游戏名时不留占位目录 ----------
+{
+    const { result } = await runFlow({
+        directUrl: 'https://cdn.example.com/x/f.zip',
+        opts: { modTitle: 'Only Mod', gameName: '', fileName: 'f' },
+        cfg: { dlImagesWithMod: false }
+    });
+    check('用例9：无游戏名时只有一层 Mod 目录', result.folder, 'Only Mod');
 }
 
 const failed = results.filter((r) => !r.ok);

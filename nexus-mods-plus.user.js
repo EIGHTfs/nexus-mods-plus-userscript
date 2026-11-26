@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强
 // @name:en      Nexus Mods Enhancer
 // @namespace    nexusmods-enhancer
-// @version      1.5.0
+// @version      1.5.1
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -31,7 +31,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.0';
+    const VERSION = '1.5.1';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -1562,7 +1562,7 @@
     modFiles {
       optional
       fileId
-      file { name sizeInBytes mod { modId name pictureUrl game { id domainName } } }
+      file { name sizeInBytes mod { modId name pictureUrl game { id domainName name } } }
     }
   }
 }`;
@@ -1749,6 +1749,7 @@
     const DL_DB_VERSION = 1;
     const DL_DB_STORE = 'root';
     const DL_DB_KEY = 'dir';
+    const DL_ROOT_NAME_KEY = 'nme.archive.rootName';   // GM 存储里的目录名标记，用于诊断记录丢失
     const DL_PROGRESS_THROTTLE_MS = 500;   // 进度刷面板的最小间隔，避免大文件把 DOM 刷爆
 
     /** 页面真实的 showDirectoryPicker：油猴沙箱里的 window 可能是代理对象 */
@@ -1761,9 +1762,13 @@
     }
 
     function dlOpenDb() {
+        // 用页面真实 indexedDB：沙箱若把 indexedDB 隔离，handle 会存进另一个库，下次读不到
+        const idb = (typeof unsafeWindow !== 'undefined' && unsafeWindow && unsafeWindow.indexedDB)
+            ? unsafeWindow.indexedDB
+            : indexedDB;
         return new Promise(function (resolve, reject) {
             let request;
-            try { request = indexedDB.open(DL_DB_NAME, DL_DB_VERSION); }
+            try { request = idb.open(DL_DB_NAME, DL_DB_VERSION); }
             catch (e) { reject(e); return; }
             request.onupgradeneeded = function () {
                 const db = request.result;
@@ -1815,6 +1820,8 @@
         try {
             const handle = await picker({ mode: 'readwrite', id: 'nme-archive-root' });
             await dlSaveRootHandle(handle);
+            // GM 存储留个名字：万一下次 IDB 读不到，能区分「没选过」和「选过但记录丢了」
+            try { GM_setValue(DL_ROOT_NAME_KEY, handle.name); } catch (ignored) { /* 存不了不影响主流程 */ }
             showToast('已选择保存目录', '之后下载会自动存到「' + handle.name + '/<Mod名>/」', 'ok');
             return handle;
         } catch (e) {
@@ -1824,12 +1831,69 @@
         }
     }
 
-    /** 取一个当前可用的根目录 handle；不可用返回 null，调用方据此降级到 GM_download */
-    async function dlUsableRoot() {
+    /**
+     * 取可用根目录，授权失效时在用户手势窗口内自动恢复。
+     *
+     * 为什么必须「点击后立刻调用」：requestPermission 依赖用户激活状态（约 5 秒），
+     * 中间只要先 await 过一次网络请求就可能失效，于是静默降级到浏览器下载、不再建文件夹。
+     * 返回值带 reason，调用方据此决定是提示去选目录、还是提示重新授权。
+     */
+    async function dlEnsureRoot() {
         let handle = null;
         try { handle = await dlLoadRootHandle(); } catch (e) { handle = null; }
-        if (!handle) return null;
-        return (await dlPermissionGranted(handle)) ? handle : null;
+        if (!handle) {
+            // IDB 读不到：可能是沙箱隔离了 indexedDB，也可能是浏览器清了站点数据。
+            // 用 GM 存储里的名字标记判断是「从没选过」还是「选过但记录丢了」。
+            let remembered = '';
+            try { remembered = GM_getValue(DL_ROOT_NAME_KEY, '') || ''; } catch (ignored) { remembered = ''; }
+            return { handle: null, reason: remembered ? 'lost' : 'not-chosen' };
+        }
+        const permission = { mode: 'readwrite' };
+        try {
+            if (await handle.queryPermission(permission) === 'granted') {
+                return { handle: handle, reason: 'ok' };
+            }
+            const granted = await handle.requestPermission(permission);
+            if (granted === 'granted') return { handle: handle, reason: 'renewed' };
+            return { handle: null, reason: 'denied' };
+        } catch (e) {
+            return { handle: null, reason: 'error' };
+        }
+    }
+
+    /** 把 dlEnsureRoot 的 reason 翻成用户能看懂的一句话 */
+    function dlRootProblemText(reason) {
+        if (reason === 'not-chosen') return '还没选保存目录';
+        if (reason === 'lost') return '保存目录记录丢失（浏览器可能清了站点数据），需要重选一次';
+        if (reason === 'denied') return '保存目录授权被拒绝';
+        if (reason === 'error') return '保存目录授权状态异常';
+        return '';
+    }
+
+    /**
+     * 拼 <游戏名>/<Mod名> 目录路径。游戏名取不到时只留 Mod 名一层，
+     * 不要用 unknown-game 之类占位目录把文件埋起来。
+     */
+    function archiveFolderPath(gameName, modFolder) {
+        const mod = sanitizeFolderName(modFolder, 'unknown-mod');
+        const game = String(gameName || '').trim() ? sanitizeFolderName(gameName, '') : '';
+        return game ? game + '/' + mod : mod;
+    }
+
+    /**
+     * 当前页面的游戏显示名。
+     * 面包屑里第一个是「游戏」总入口，第二个才是具体游戏页；
+     * 只认 /games/<domain> 这一层，避开 /games/<domain>/mods 之类的子链接。
+     */
+    function pickGameNameFromDom() {
+        const links = document.querySelectorAll('#breadcrumb a[href*="/games/"]');
+        for (let i = 0; i < links.length; i++) {
+            const href = links[i].getAttribute('href') || '';
+            if (!/\/games\/[^/]+\/?$/.test(href)) continue;
+            const text = (links[i].textContent || '').trim();
+            if (text) return text;
+        }
+        return '';
     }
 
     /** GM_xmlhttpRequest 取整个响应为 blob（跨域兜底通道） */
@@ -1893,9 +1957,16 @@
         }
     }
 
-    /** 在根目录下建 <folder>/ 并写入一个文件 */
-    async function dlSaveToRoot(rootHandle, folder, fileName, url, onProgress) {
-        const dirHandle = await rootHandle.getDirectoryHandle(folder, { create: true });
+    /**
+     * 在根目录下按 folderPath 逐级建目录并写入一个文件。
+     * getDirectoryHandle 只接受单级名字，所以 <游戏名>/<Mod名> 必须自己逐段拆开建。
+     */
+    async function dlSaveToRoot(rootHandle, folderPath, fileName, url, onProgress) {
+        const segments = String(folderPath || '').split('/').filter(Boolean);
+        let dirHandle = rootHandle;
+        for (let i = 0; i < segments.length; i++) {
+            dirHandle = await dirHandle.getDirectoryHandle(segments[i], { create: true });
+        }
         await dlWriteUrlToFile(dirHandle, fileName, url, onProgress);
     }
 
@@ -1916,9 +1987,8 @@
      */
     async function archivePutFile(folder, fileName, url, options) {
         const opts = options || {};
-        const rootHandle = await dlUsableRoot();
-        if (rootHandle) {
-            await dlSaveToRoot(rootHandle, folder, fileName, url, opts.onProgress);
+        if (opts.rootHandle) {
+            await dlSaveToRoot(opts.rootHandle, folder, fileName, url, opts.onProgress);
             return 'fs';
         }
         await gmDownloadTo(url, folder + '/' + fileName, {
@@ -2109,7 +2179,8 @@
     async function archiveDownload(opts) {
         const log = typeof opts.log === 'function' ? opts.log : function () {};
         const modTitle = opts.modTitle || '';
-        const folder = sanitizeFolderName(modTitle, 'mod-' + (opts.modId || opts.fileId || 'unknown'));
+        // 多一层游戏名：<游戏名>/<Mod名>/，同一游戏的 mod 聚在一起
+        const folder = archiveFolderPath(opts.gameName, modTitle || ('mod-' + (opts.modId || opts.fileId || 'unknown')));
 
         const url = await resolveWithRetry(opts.domain, opts.modId, opts.fileId, opts.gameId);
         const fileName = sanitizeFileName(
@@ -2124,10 +2195,13 @@
             log('下载中 ' + fmtSize(p.loaded) + (p.total ? ' / ' + fmtSize(p.total) : ''), 'busy');
         });
         const channel = await archivePutFile(folder, fileName, url, {
+            rootHandle: opts.rootHandle,
             onProgress: progress,
             onLateError: function (reason) { log('下载中断：' + fileName + ' — ' + reason, 'err'); }
         });
         if (channel === 'fs') log('已写入所选目录：' + relPath, 'ok');
+        else log('⚠ 没走保存目录（' + (dlRootProblemText(opts.rootReason) || '未授权') +
+            '），已退回浏览器下载，这条通道不保证建文件夹', 'warn');
 
         // 图片默认不跟着安装包走（见 DEFAULTS 注释）；独立按钮调用时用 forceImages 显式要求
         if (!opts.forceImages && !CFG.dlImagesWithMod) return { folder: folder, file: fileName, images: 0 };
@@ -2146,7 +2220,7 @@
                 'image.png'
             );
             try {
-                await archivePutFile(folder, imageName, imageUrl, {});
+                await archivePutFile(folder, imageName, imageUrl, { rootHandle: opts.rootHandle });
                 saved++;
                 log('图片 ' + (i + 1) + '/' + images.length + '：' + imageName, 'ok');
             } catch (e) {
@@ -2165,7 +2239,9 @@
         try { mod = await ensureModDetail(ctx); } catch (e) { mod = null; }
         const title = domTitle || (mod && mod.name) || ('mod-' + ctx.modId);
         return {
-            folder: sanitizeFolderName(title, 'mod-' + ctx.modId),
+            modTitle: sanitizeFolderName(title, 'mod-' + ctx.modId),
+            // 游戏名优先取面包屑（站点展示名），接口返回兜底
+            gameName: pickGameNameFromDom() || (mod && mod.game && mod.game.name) || '',
             pictureUrl: (mod && mod.pictureUrl) || '',
             version: (mod && mod.version) || ''
         };
@@ -2186,13 +2262,18 @@
         btn.textContent = '获取中…';
         dlStatus('正在收集该 mod 的图片…', 'busy');
         try {
+            const root = await dlEnsureRoot();
+            if (!root.handle) {
+                dlStatus('⚠ ' + dlRootProblemText(root.reason) + '，将退回浏览器下载（不保证建文件夹）', 'warn');
+            }
             const meta = await resolveArchiveMeta(ctx);
+            const folder = archiveFolderPath(meta.gameName, meta.modTitle);
             const images = collectArchiveImages({ ctxMode: 'detail', pictureUrl: meta.pictureUrl });
             if (!images.length) {
                 dlStatus('该 mod 没有可下载的图片', 'warn');
                 return;
             }
-            dlStatus('开始下载 ' + images.length + ' 张图片到 ' + meta.folder + '/ …', 'busy');
+            dlStatus('开始下载 ' + images.length + ' 张图片到 ' + folder + '/ …', 'busy');
             let saved = 0;
             for (let i = 0; i < images.length; i++) {
                 const imageUrl = images[i];
@@ -2201,7 +2282,7 @@
                     'image.png'
                 );
                 try {
-                    await archivePutFile(meta.folder, imageName, imageUrl, {});
+                    await archivePutFile(folder, imageName, imageUrl, { rootHandle: root.handle });
                     saved++;
                     dlStatus('图片 ' + (i + 1) + '/' + images.length + '：' + imageName, 'ok');
                 } catch (e) {
@@ -2209,7 +2290,7 @@
                 }
                 if (i < images.length - 1) await sleep(DL_IMG_GAP_MS);
             }
-            dlStatus('已下载 ' + saved + '/' + images.length + ' 张图片到 ' + meta.folder + '/', 'ok');
+            dlStatus('已下载 ' + saved + '/' + images.length + ' 张图片到 ' + folder + '/', 'ok');
         } catch (e) {
             dlStatus((e && e.message) || String(e), 'err');
         } finally {
@@ -2297,7 +2378,8 @@
             return;
         }
         const relPath = DL_SELFTEST_FOLDER + '/self-test.png';
-        const usableRoot = await dlUsableRoot();
+        const root = await dlEnsureRoot();
+        const usableRoot = root.handle;
         if (dlPickerApi() && !usableRoot) {
             showToast('请先选择保存目录',
                 '你的浏览器支持文件系统通道，但还没选目录。先点面板上的「选择保存目录」——' +
@@ -2305,7 +2387,7 @@
             return;
         }
         showToast('归档自测', '正在下载到 ' + relPath + ' …', 'busy');
-        archivePutFile(DL_SELFTEST_FOLDER, 'self-test.png', DL_SELFTEST_IMAGE, {})
+        archivePutFile(DL_SELFTEST_FOLDER, 'self-test.png', DL_SELFTEST_IMAGE, { rootHandle: root.handle })
             .then(function (channel) {
                 const viaFs = channel === 'fs';
                 showToast('自测成功（' + (viaFs ? '文件系统通道' : 'GM_download 通道') + '）',
@@ -2432,10 +2514,16 @@
         btn.textContent = '获取中…';
         dlStatus('正在获取「' + (file.name || file.fileId) + '」的下载地址…', 'busy');
         try {
-            // 归档模式：一个 mod 一个文件夹，安装包与预览图都进去
+            // 归档模式：<游戏名>/<Mod名>/，安装包与预览图都进去
             if (CFG.dlFolder && dlHasArchiveChannel()) {
+                // 第一件事就是确认目录授权：用户激活窗口只有几秒，先等网络请求会把它耗掉
+                const root = await dlEnsureRoot();
+                if (!root.handle) {
+                    dlStatus('⚠ ' + dlRootProblemText(root.reason) + '，将退回浏览器下载（不保证建文件夹）', 'warn');
+                }
                 const meta = await resolveArchiveMeta(ctx);
-                dlStatus('正在下载到 ' + meta.folder + '/ …', 'busy');
+                const target = archiveFolderPath(meta.gameName, meta.modTitle);
+                dlStatus('正在下载到 ' + target + '/ …', 'busy');
                 const result = await archiveDownload({
                     domain: ctx.domain,
                     modId: ctx.modId,
@@ -2443,9 +2531,12 @@
                     gameId: state.dlGameId,
                     fileName: file.name,
                     version: file.version || meta.version,
-                    modTitle: meta.folder,
+                    modTitle: meta.modTitle,
+                    gameName: meta.gameName,
                     pictureUrl: meta.pictureUrl,
                     ctxMode: 'detail',
+                    rootHandle: root.handle,
+                    rootReason: root.reason,
                     log: function (text, kind) { dlStatus(text, kind); }
                 });
                 markDl(file.fileId);
@@ -2572,6 +2663,7 @@
                     pictureUrl: modInfo.pictureUrl || '',
                     domain: gameInfo.domainName || ctx.domain,
                     gameId: gameInfo.id,
+                    gameName: gameInfo.name || '',
                     optional: !!mf.optional
                 };
             }).filter(function (m) { return m.fileId && m.modId && m.gameId; });
@@ -2620,6 +2712,16 @@
             '继续？'
         );
         if (!ok) return;
+
+        // 目录授权：confirm 的「确定」同样是一次用户激活，趁激活窗口还在先确认
+        if (CFG.dlFolder && dlHasArchiveChannel()) {
+            const root = await dlEnsureRoot();
+            state.dlRootHandle = root.handle;
+            state.dlRootReason = root.reason;
+            if (!root.handle) {
+                dlLog('⚠ ' + dlRootProblemText(root.reason) + '，将退回浏览器下载（不保证建文件夹）', 'warn');
+            }
+        }
 
         const history = dlHistoryLoad();
         const key = dlHistoryKey(ctx);
@@ -2681,8 +2783,11 @@
                         gameId: f.gameId,
                         fileName: f.name,
                         modTitle: f.modName,
+                        gameName: f.gameName,
                         pictureUrl: f.pictureUrl,
                         ctxMode: 'collection',
+                        rootHandle: state.dlRootHandle,
+                        rootReason: state.dlRootReason,
                         log: function (text, kind) { dlLog('    ' + text, kind); }
                     });
                     markDl(f.fileId);
