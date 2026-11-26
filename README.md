@@ -29,9 +29,10 @@
 
 ### 安装
 
-```
-https://raw.githubusercontent.com/EIGHTfs/nexus-mods-plus-userscript/main/nexus-mods-plus.user.js
-```
+1. 下载仓库里的 `nexus-mods-plus.user.js`
+2. 在脚本管理器（ScriptCat / Tampermonkey / Violentmonkey）里新建脚本，粘贴内容并保存
+
+仓库为私有，raw 链接需要 token 才能访问，因此不走一键安装。
 
 ### 第一次使用
 
@@ -79,3 +80,7 @@ node test/test-archive-flow.mjs        # 流程：路径拼接、图片同目录
 
 - [使用说明](docs/使用说明.md)
 - [1.3.3 原版备份](archive/nexus-mods-plus-1.3.3.orig.user.js)
+
+## 许可
+
+MIT · 原作者 SmallRob。脚本头部保留原始 `@author` 与 `@license` 声明。
