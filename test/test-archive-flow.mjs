@@ -97,7 +97,7 @@ async function runFlow(options) {
         CFG: Object.assign({ dlImagesWithMod: true, dlImgLimit: 12 }, options.cfg || {}),
         sleep: async () => {},
         // 桩：直链解析结果由用例决定
-        resolveWithRetry: async () => options.directUrl,
+        resolveWithRetry: async () => ({ url: options.directUrl, filename: options.apiFileName || '' }),
         // 桩：archiveDownload 现在统一走 archivePutFile（内部再选 FS / GM_download 通道）
         archivePutFile: async (folder, fileName, url) => {
             if (options.failOn && options.failOn(url)) throw new Error('浏览器拒绝下载：模拟失败');
@@ -240,6 +240,19 @@ async function runFlow(options) {
         cfg: { dlImagesWithMod: false }
     });
     check('用例9：无游戏名时只有一层 Mod 目录', result.folder, 'Only Mod');
+}
+
+// ---------- 用例 10：接口给的真实文件名优先于直链末段 ----------
+{
+    const { calls } = await runFlow({
+        directUrl: 'https://cdn.example.com/abc/def-1234567890.bin',
+        apiFileName: 'Vidya_Agave v1.2.7z',
+        opts: { modTitle: 'Agave', fileName: 'Agave Outfit', gameName: 'Snowbreak: Containment Zone' },
+        cfg: { dlImagesWithMod: false }
+    });
+    check('用例10：用接口文件名，不用 CDN 混淆名',
+        calls[0],
+        'Snowbreak_ Containment Zone/Agave/Vidya_Agave v1.2.7z');
 }
 
 const failed = results.filter((r) => !r.ok);

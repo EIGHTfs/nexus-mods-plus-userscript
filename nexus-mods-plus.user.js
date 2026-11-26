@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强
 // @name:en      Nexus Mods Enhancer
 // @namespace    nexusmods-enhancer
-// @version      1.5.1
+// @version      1.5.2
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -31,7 +31,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.1';
+    const VERSION = '1.5.2';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -1609,7 +1609,11 @@
         let data;
         try { data = await res.json(); } catch (e) { throw new DlError('API', '接口返回不是有效 JSON'); }
         if (!data || !data.url) throw new DlError('API', '接口没有返回下载地址');
-        return data.url;
+        // 接口有时会一并给出真实文件名，比直链末段更准（CDN 末段常是混淆名）
+        return {
+            url: decodeDlUrl(data.url),
+            filename: String(data.filename || data.fileName || data.name || '')
+        };
     }
 
     function decodeDlUrl(u) {
@@ -1677,7 +1681,7 @@
             if (apiError) throw apiError;
             throw new DlError('NO_URL', '未取到下载地址（该文件可能需要手动确认或 Premium）');
         }
-        return url;
+        return { url: url, filename: '' };
     }
 
     /** 网络类错误重试一次；被拦截/无权限不重试 */
@@ -1919,42 +1923,78 @@
 
     /**
      * 把 url 流式写入 dirHandle/name。
-     * 先走 fetch（图片 CDN 实测 access-control-allow-origin: *）；
-     * 跨域被拒时退回 GM_xmlhttpRequest 取 blob —— 大文件会占内存，但没有别的通道。
+     *
+     * 关键顺序：先把数据拿到手，再创建文件。
+     * 反过来（先 getFileHandle({create:true}) 再 fetch）一旦请求失败，
+     * abort() 只丢弃写入内容、不会删掉已创建的文件，磁盘上就留下一个 0 字节的压缩包。
+     * 另外无论走哪条通道，最后都校验写入字节数，0 字节一律删文件并报错。
      */
     async function dlWriteUrlToFile(dirHandle, fileName, url, onProgress) {
-        const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-        const writable = await fileHandle.createWritable();
+        let loadedBytes = 0;
         try {
             const response = await fetch(url, { credentials: 'include' });
             if (!response.ok) throw new Error('HTTP ' + response.status);
             if (!response.body || typeof response.body.getReader !== 'function') {
-                await writable.write(await response.arrayBuffer());
-                await writable.close();
-                return true;
+                const buffer = await response.arrayBuffer();
+                loadedBytes = buffer.byteLength;
+                await dlWriteBuffer(dirHandle, fileName, buffer);
+            } else {
+                const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+                const writable = await fileHandle.createWritable();
+                const total = Number(response.headers.get('content-length') || 0);
+                const reader = response.body.getReader();
+                try {
+                    for (;;) {
+                        const chunk = await reader.read();
+                        if (chunk.done) break;
+                        await writable.write(chunk.value);
+                        loadedBytes += chunk.value.byteLength;
+                        if (typeof onProgress === 'function') onProgress({ loaded: loadedBytes, total: total });
+                    }
+                    await writable.close();
+                } catch (streamError) {
+                    try { await writable.abort(); } catch (ignored) { /* 已失败，忽略 */ }
+                    throw streamError;
+                }
             }
-            const total = Number(response.headers.get('content-length') || 0);
-            const reader = response.body.getReader();
-            let loaded = 0;
-            for (;;) {
-                const chunk = await reader.read();
-                if (chunk.done) break;
-                await writable.write(chunk.value);
-                loaded += chunk.value.byteLength;
-                if (typeof onProgress === 'function') onProgress({ loaded: loaded, total: total });
-            }
-            await writable.close();
-            return true;
         } catch (fetchError) {
-            try { await writable.abort(); } catch (ignored) { /* 已失败，忽略 */ }
-            if (typeof GM_xmlhttpRequest !== 'function') throw fetchError;
-            const blob = await dlFetchBlobViaGm(url, onProgress);
-            const fallbackHandle = await dirHandle.getFileHandle(fileName, { create: true });
-            const fallbackWritable = await fallbackHandle.createWritable();
-            await fallbackWritable.write(blob);
-            await fallbackWritable.close();
-            return true;
+            // fetch 通道失败（CORS / 403 / 网络）：改用 GM_xhr 取完整 blob 再写
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                await dlRemoveEntry(dirHandle, fileName);
+                throw fetchError;
+            }
+            let blob = null;
+            try {
+                blob = await dlFetchBlobViaGm(url, onProgress);
+            } catch (gmError) {
+                await dlRemoveEntry(dirHandle, fileName);
+                throw gmError;
+            }
+            if (!blob || !blob.size) {
+                await dlRemoveEntry(dirHandle, fileName);
+                throw new Error('下载内容为空（0 字节）');
+            }
+            loadedBytes = blob.size;
+            await dlWriteBuffer(dirHandle, fileName, blob);
         }
+        if (!loadedBytes) {
+            await dlRemoveEntry(dirHandle, fileName);
+            throw new Error('下载内容为空（0 字节），已删除空文件');
+        }
+        return true;
+    }
+
+    /** 整块写入：小文件与 blob 兜底通道用 */
+    async function dlWriteBuffer(dirHandle, fileName, data) {
+        const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(data);
+        await writable.close();
+    }
+
+    /** 删掉失败时留下的空文件，避免磁盘上出现 0 字节压缩包 */
+    async function dlRemoveEntry(dirHandle, fileName) {
+        try { await dirHandle.removeEntry(fileName); } catch (ignored) { /* 本来就不存在就算了 */ }
     }
 
     /**
@@ -2057,9 +2097,12 @@
      * Nexus 的 file.name 经常没有扩展名（如 "Siris-FreeFin_Azure Drift_a little naughty"），
      * 直接当文件名会存成无后缀文件、双击打不开 —— 所以按「原名 → 直链末段 → mod 名+版本」三级兜底。
      */
-    function pickDownloadFileName(file, url, modTitle) {
+    function pickDownloadFileName(file, url, modTitle, apiFileName) {
+        // 优先级：接口给的真实文件名 → 文件标题 → 直链末段 → mod 名+版本兜底
+        const fromApi = String(apiFileName || '').trim();
         const declared = String((file && file.name) || '').trim();
         const fromUrl = fileNameFromUrl(url);
+        if (fromApi && DL_FILE_EXT.test(fromApi)) return fromApi;
         if (declared && DL_FILE_EXT.test(declared)) return declared;
         if (fromUrl && DL_FILE_EXT.test(fromUrl)) return fromUrl;
         const version = file && file.version ? '-' + file.version : '';
@@ -2182,9 +2225,15 @@
         // 多一层游戏名：<游戏名>/<Mod名>/，同一游戏的 mod 聚在一起
         const folder = archiveFolderPath(opts.gameName, modTitle || ('mod-' + (opts.modId || opts.fileId || 'unknown')));
 
-        const url = await resolveWithRetry(opts.domain, opts.modId, opts.fileId, opts.gameId);
+        const resolved = await resolveWithRetry(opts.domain, opts.modId, opts.fileId, opts.gameId);
+        const url = resolved.url;
         const fileName = sanitizeFileName(
-            pickDownloadFileName({ name: opts.fileName, version: opts.version }, url, modTitle),
+            pickDownloadFileName(
+                { name: opts.fileName, version: opts.version },
+                url,
+                modTitle,
+                resolved.filename
+            ),
             'file.zip'
         );
         const relPath = folder + '/' + fileName;
@@ -2545,8 +2594,8 @@
                 return;
             }
             // 未启用归档 / 管理器不支持 GM_download：保持 1.3.3 的单文件下载行为
-            const url = await resolveWithRetry(ctx.domain, ctx.modId, file.fileId, state.dlGameId);
-            triggerDownload(url, file.name);
+            const resolved = await resolveWithRetry(ctx.domain, ctx.modId, file.fileId, state.dlGameId);
+            triggerDownload(resolved.url, file.name);
             markDl(file.fileId);
             dlStatus('已开始下载：' + (file.name || file.fileId), 'ok');
         } catch (e) {
@@ -2800,8 +2849,8 @@
                     dlLog('[' + (i + 1) + '/' + queue.length + '] 已保存到 ' + result.folder + '/' + result.file +
                         (result.images ? '（+' + result.images + ' 图）' : ''), 'ok');
                 } else {
-                    const url = await resolveWithRetry(f.domain, f.modId, f.fileId, f.gameId);
-                    triggerDownload(url, f.name);
+                    const resolved = await resolveWithRetry(f.domain, f.modId, f.fileId, f.gameId);
+                    triggerDownload(resolved.url, f.name);
                     markDl(f.fileId);
                     done.push(f.fileId);
                     history[key] = done;
