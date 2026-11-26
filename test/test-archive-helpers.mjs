@@ -56,7 +56,8 @@ const functions = [
     'sanitizeFileName',
     'fileNameFromUrl',
     'pickDownloadFileName',
-    'collectImagesFromDom'
+    'collectImagesFromDom',
+    'dlResolveFinalFileName'
 ].map(extractFunction).join('\n\n');
 
 /** 最小 DOM 桩：只提供 collectImagesFromDom 用到的那点能力 */
@@ -148,6 +149,30 @@ check('图片：只收原图，去掉缩略图/data URI/重复项',
         'https://staticdelivery.nexusmods.com/mods/5577/images/868/868-1760599327-512078410.png',
         'https://staticdelivery.nexusmods.com/mods/5577/images/868/868-1760599338-1231626948.png'
     ]);
+
+// ---------- 最终文件名解析（Nexus 真实名只在重定向后出现） ----------
+const { dlResolveFinalFileName } = context;
+function fakeResponse(headers, finalUrl) {
+    return { headers: { get: (name) => (name.toLowerCase() === 'content-disposition' ? headers : null) }, url: finalUrl };
+}
+check('定名：Content-Disposition 优先',
+    dlResolveFinalFileName(
+        fakeResponse('attachment; filename="Enya_Tempest(default)_a little naughty-868-1-2-1762417842.zip"',
+            'https://cdn.example.com/x/other-name.bin'),
+        'fallback.zip'),
+    'Enya_Tempest(default)_a little naughty-868-1-2-1762417842.zip');
+check('定名：没有 CD 头时用重定向后 URL 末段',
+    dlResolveFinalFileName(fakeResponse('', 'https://supporter-files.nexus-cdn.com/5577/1056/Enya-868-1-2-1762417842.zip?md5=x'),
+        'fallback.zip'),
+    'Enya-868-1-2-1762417842.zip');
+check('定名：都没有时用调用方提示名',
+    dlResolveFinalFileName(fakeResponse('', 'https://www.nexusmods.com/Core/Libs/Common/Widgets/DownloadFile'),
+        'Mod-1.zip'),
+    'Mod-1.zip');
+check('定名：URL 末段无扩展名时不误用',
+    dlResolveFinalFileName(fakeResponse('', 'https://www.nexusmods.com/Core/Libs/Common/Widgets/DownloadFile'),
+        'Real-868-1-2-1762417842.zip'),
+    'Real-868-1-2-1762417842.zip');
 
 const failed = results.filter((r) => !r.ok);
 console.log('\n结果：' + (results.length - failed.length) + '/' + results.length + ' 通过');

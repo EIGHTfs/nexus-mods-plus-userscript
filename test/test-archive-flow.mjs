@@ -102,7 +102,8 @@ async function runFlow(options) {
         archivePutFile: async (folder, fileName, url) => {
             if (options.failOn && options.failOn(url)) throw new Error('浏览器拒绝下载：模拟失败');
             calls.push(folder + '/' + fileName);
-            return 'gm';
+            // 模拟写盘函数返回最终落盘名（重定向后才拿到的真实名）
+            return { channel: 'gm', fileName: options.finalFileName || fileName };
         },
         // 进度节流与体积格式化在流程里会用到，桩掉避免拖进无关依赖
         dlThrottledProgress: (render) => render,

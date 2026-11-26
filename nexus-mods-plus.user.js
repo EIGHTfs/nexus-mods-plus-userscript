@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强
 // @name:en      Nexus Mods Enhancer
 // @namespace    nexusmods-enhancer
-// @version      1.5.2
+// @version      1.5.3
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -31,7 +31,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.2';
+    const VERSION = '1.5.3';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -1929,11 +1929,15 @@
      * abort() 只丢弃写入内容、不会删掉已创建的文件，磁盘上就留下一个 0 字节的压缩包。
      * 另外无论走哪条通道，最后都校验写入字节数，0 字节一律删文件并报错。
      */
-    async function dlWriteUrlToFile(dirHandle, fileName, url, onProgress) {
+    async function dlWriteUrlToFile(dirHandle, fileNameHint, url, onProgress) {
         let loadedBytes = 0;
+        let finalName = sanitizeFileName(fileNameHint, 'file.zip');
         try {
             const response = await fetch(url, { credentials: 'include' });
             if (!response.ok) throw new Error('HTTP ' + response.status);
+            // 响应到手才知道真实文件名（重定向之后才有 CDN 直链）
+            finalName = dlResolveFinalFileName(response, fileNameHint);
+            const fileName = finalName;
             if (!response.body || typeof response.body.getReader !== 'function') {
                 const buffer = await response.arrayBuffer();
                 loadedBytes = buffer.byteLength;
@@ -1960,28 +1964,67 @@
         } catch (fetchError) {
             // fetch 通道失败（CORS / 403 / 网络）：改用 GM_xhr 取完整 blob 再写
             if (typeof GM_xmlhttpRequest !== 'function') {
-                await dlRemoveEntry(dirHandle, fileName);
+                await dlRemoveEntry(dirHandle, finalName);
                 throw fetchError;
             }
             let blob = null;
             try {
                 blob = await dlFetchBlobViaGm(url, onProgress);
             } catch (gmError) {
-                await dlRemoveEntry(dirHandle, fileName);
+                await dlRemoveEntry(dirHandle, finalName);
                 throw gmError;
             }
             if (!blob || !blob.size) {
-                await dlRemoveEntry(dirHandle, fileName);
+                await dlRemoveEntry(dirHandle, finalName);
                 throw new Error('下载内容为空（0 字节）');
             }
             loadedBytes = blob.size;
-            await dlWriteBuffer(dirHandle, fileName, blob);
+            await dlWriteBuffer(dirHandle, finalName, blob);
         }
         if (!loadedBytes) {
-            await dlRemoveEntry(dirHandle, fileName);
+            await dlRemoveEntry(dirHandle, finalName);
             throw new Error('下载内容为空（0 字节），已删除空文件');
         }
-        return true;
+        return finalName;
+    }
+
+    /**
+     * 决定最终落盘文件名。
+     *
+     * Nexus 给的下载地址通常不是 CDN 直链，而是会 302 到 CDN 的接口地址，
+     * 直链末段拿不到真实文件名 —— 真实名（形如 <标题>-<modId>-<fileId>-<版本>-<时间戳>.zip）
+     * 只在跟随重定向之后才出现，所以必须在响应到手之后才定名。
+     * 优先级：Content-Disposition → 重定向后的最终 URL 末段 → 调用方提示名。
+     */
+    function dlResolveFinalFileName(response, hint) {
+        const candidates = [];
+        try {
+            const disposition = response.headers.get('content-disposition') || '';
+            const match = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(disposition);
+            if (match) candidates.push(decodeURIComponent(match[1] || match[2] || ''));
+        } catch (ignored) { /* 头读不到就跳过 */ }
+        try { candidates.push(fileNameFromUrl(response.url)); } catch (ignored) { /* 同上 */ }
+        candidates.push(String(hint || ''));
+        for (let i = 0; i < candidates.length; i++) {
+            const raw = String(candidates[i] || '').trim();
+            if (!raw) continue;
+            const cleaned = raw.replace(DL_FOLDER_BAD, '_').trim();
+            if (DL_FILE_EXT.test(cleaned)) return sanitizeFileName(cleaned, cleaned);
+        }
+        return sanitizeFileName(hint, 'file.zip');
+    }
+
+    /**
+     * 探测真实文件名。
+     * GM_download 是 URL 直传，下载完没法改名，只能先 HEAD 一次拿响应头；
+     * 探测失败（405/403/网络）不影响下载，退回提示名。
+     */
+    async function dlProbeFileName(url, hint) {
+        try {
+            const response = await fetch(url, { method: 'HEAD', credentials: 'include' });
+            if (response.ok) return dlResolveFinalFileName(response, hint);
+        } catch (ignored) { /* 探测失败就用提示名 */ }
+        return hint;
     }
 
     /** 整块写入：小文件与 blob 兜底通道用 */
@@ -2007,7 +2050,7 @@
         for (let i = 0; i < segments.length; i++) {
             dirHandle = await dirHandle.getDirectoryHandle(segments[i], { create: true });
         }
-        await dlWriteUrlToFile(dirHandle, fileName, url, onProgress);
+        return await dlWriteUrlToFile(dirHandle, fileName, url, onProgress);
     }
 
     /** 进度节流：大文件每读一块都改 DOM 会把页面拖卡 */
@@ -2028,14 +2071,15 @@
     async function archivePutFile(folder, fileName, url, options) {
         const opts = options || {};
         if (opts.rootHandle) {
-            await dlSaveToRoot(opts.rootHandle, folder, fileName, url, opts.onProgress);
-            return 'fs';
+            const finalName = await dlSaveToRoot(opts.rootHandle, folder, fileName, url, opts.onProgress);
+            return { channel: 'fs', fileName: finalName };
         }
-        await gmDownloadTo(url, folder + '/' + fileName, {
+        const probedName = await dlProbeFileName(url, fileName);
+        await gmDownloadTo(url, folder + '/' + probedName, {
             mode: 'start',
             onLateError: opts.onLateError
         });
-        return 'gm';
+        return { channel: 'gm', fileName: probedName };
     }
 
     /** 是否有任何能建目录的通道：File System Access 或 GM_download 子目录 */
@@ -2243,17 +2287,19 @@
         const progress = dlThrottledProgress(function (p) {
             log('下载中 ' + fmtSize(p.loaded) + (p.total ? ' / ' + fmtSize(p.total) : ''), 'busy');
         });
-        const channel = await archivePutFile(folder, fileName, url, {
+        const put = await archivePutFile(folder, fileName, url, {
             rootHandle: opts.rootHandle,
             onProgress: progress,
             onLateError: function (reason) { log('下载中断：' + fileName + ' — ' + reason, 'err'); }
         });
-        if (channel === 'fs') log('已写入所选目录：' + relPath, 'ok');
+        // put.fileName 才是真正落盘的名字（重定向后才拿到 CDN 真实文件名）
+        const finalRelPath = folder + '/' + put.fileName;
+        if (put.channel === 'fs') log('已写入所选目录：' + finalRelPath, 'ok');
         else log('⚠ 没走保存目录（' + (dlRootProblemText(opts.rootReason) || '未授权') +
             '），已退回浏览器下载，这条通道不保证建文件夹', 'warn');
 
         // 图片默认不跟着安装包走（见 DEFAULTS 注释）；独立按钮调用时用 forceImages 显式要求
-        if (!opts.forceImages && !CFG.dlImagesWithMod) return { folder: folder, file: fileName, images: 0 };
+        if (!opts.forceImages && !CFG.dlImagesWithMod) return { folder: folder, file: put.fileName, images: 0 };
 
         const images = collectArchiveImages(opts);
         if (!images.length) {
@@ -2278,7 +2324,7 @@
             }
             if (i < images.length - 1) await sleep(DL_IMG_GAP_MS);
         }
-        return { folder: folder, file: fileName, images: saved };
+        return { folder: folder, file: put.fileName, images: saved };
     }
 
     /** 详情页归档所需的 mod 元信息：目录名、封面、版本（接口失败也不阻塞下载） */
@@ -2437,8 +2483,8 @@
         }
         showToast('归档自测', '正在下载到 ' + relPath + ' …', 'busy');
         archivePutFile(DL_SELFTEST_FOLDER, 'self-test.png', DL_SELFTEST_IMAGE, { rootHandle: root.handle })
-            .then(function (channel) {
-                const viaFs = channel === 'fs';
+            .then(function (put) {
+                const viaFs = put.channel === 'fs';
                 showToast('自测成功（' + (viaFs ? '文件系统通道' : 'GM_download 通道') + '）',
                     '请确认' + (viaFs ? '所选保存目录' : '浏览器下载目录') + '下出现「' + relPath + '」。' +
                     (viaFs ? '' : '若文件落在根目录、名字里带下划线，说明管理器没把子目录传给浏览器 —— 请点「选择保存目录」改用文件系统通道。'),
