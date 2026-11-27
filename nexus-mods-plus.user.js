@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强（下载增强版）
 // @name:en      Nexus Mods Enhancer (Download Enhanced)
 // @namespace    nexusmods-enhancer-e8
-// @version      1.6.9
+// @version      1.7.0
 // @description  下载增强：按 mod 归档到「游戏名/Mod名」目录，断点续传、总进度条与单文件进度、已下载标记、图片单独下载、合集批量下载、脚本设置面板。另含原作的列表增强（80 条/页、9 种排序、中文筛选）、界面中文化与 AI 翻译分析。
 // @description:en  Download enhancements: per-mod folders under game/mod name, resumable downloads, total and per-file progress, downloaded markers, separate image download, collection batch download, settings panel. Also includes the original list enhancements (80 per page, 9 sort modes, Chinese filters), localized UI, and AI translation/analysis.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -37,7 +37,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.6.9';
+    const VERSION = '1.7.0';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -1160,21 +1160,14 @@
         dock.id = 'nme-dock';
         document.body.appendChild(dock);
 
-        // 点击坞以外：同时收起两个弹出面板
+        // 点击坞以外：收起浮动面板
         document.addEventListener('click', function (e) {
             if (!dock.contains(e.target)) {
                 closeFab();
-                closeCapsule();
             }
         });
 
         return dock;
-    }
-
-    /** 收起胶囊快捷面板 */
-    function closeCapsule() {
-        const dock = document.getElementById('nme-dock');
-        if (dock) dock.classList.remove('nme-cap-open');
     }
 
     function mountFab(ctx) {
@@ -1267,8 +1260,6 @@
     function openFab(sec) {
         const card = $('#nme-fab-card');
         if (!card) return;
-        // 面板互斥：打开 AI/下载面板时收起快捷面板，避免两个浮层叠在一起
-        closeCapsule();
         card.hidden = false;
         setFabSection(sec);
     }
@@ -1488,40 +1479,51 @@
             '<div class="nme-ai-modal">',
             '  <div class="nme-ai-modal-title">脚本设置</div>',
 
-            '  <div class="nme-cfg-section" data-sec="download">下载</div>',
-            '  <div class="nme-cfg-row">',
-            '    <span class="nme-cfg-label">保存目录</span>',
-            '    <button id="nme-cfg-dir" class="nme-ai-btn" type="button">读取中…</button>',
-            '  </div>',
-            '  <div class="nme-ai-modal-help">选一次目录后，下载会自动在该目录下建 <code>游戏名/Mod 名/</code>；不选则退回浏览器下载目录，那条通道是否建文件夹取决于脚本管理器。</div>',
-            '  <label class="nme-cfg-check"><input id="nme-cfg-folder" type="checkbox"> 按 mod 建文件夹</label>',
-            '  <div class="nme-cfg-row">',
-            '    <span class="nme-cfg-label">每个 mod 最多图片数</span>',
-            '    <input id="nme-cfg-imglimit" class="nme-cfg-num" type="number" min="0" max="50" step="1">',
-            '  </div>',
-            '  <div class="nme-cfg-row">',
-            '    <span class="nme-cfg-label">合集下载间隔（秒）</span>',
-            '    <input id="nme-cfg-gap" class="nme-cfg-num" type="number" min="1" max="60" step="1">',
-            '  </div>',
-            '  <label class="nme-cfg-check"><input id="nme-cfg-skipwait" type="checkbox"> 跳过下载等待页</label>',
+            // 三个分区都用原生 <details> 折叠，默认收起（不加 open）；
+            // 用原生元素而不是自写 JS 折叠，键盘可达、语义正确、少一份状态要维护
+            '  <details class="nme-cfg-group" data-sec="download">',
+            '    <summary class="nme-cfg-section">下载</summary>',
+            '    <div class="nme-cfg-row">',
+            '      <span class="nme-cfg-label">保存目录</span>',
+            '      <button id="nme-cfg-dir" class="nme-ai-btn" type="button">读取中…</button>',
+            '    </div>',
+            '    <div class="nme-ai-modal-help">选一次目录后，下载会自动在该目录下建 <code>游戏名/Mod 名/</code>；不选则退回浏览器下载目录，那条通道是否建文件夹取决于脚本管理器。</div>',
+            '    <label class="nme-cfg-check"><input id="nme-cfg-folder" type="checkbox"> 按 mod 建文件夹</label>',
+            '    <div class="nme-cfg-row">',
+            '      <span class="nme-cfg-label">每个 mod 最多图片数</span>',
+            '      <input id="nme-cfg-imglimit" class="nme-cfg-num" type="number" min="0" max="50" step="1">',
+            '    </div>',
+            '    <div class="nme-cfg-row">',
+            '      <span class="nme-cfg-label">合集下载间隔（秒）</span>',
+            '      <input id="nme-cfg-gap" class="nme-cfg-num" type="number" min="1" max="60" step="1">',
+            '    </div>',
+            '    <label class="nme-cfg-check"><input id="nme-cfg-skipwait" type="checkbox"> 跳过下载等待页</label>',
+            '  </details>',
 
-            '  <div class="nme-cfg-section" data-sec="ui">界面</div>',
-            '  <div class="nme-cfg-row">',
-            '    <span class="nme-cfg-label">每页条数</span>',
-            '    <select id="nme-cfg-pagesize" class="nme-cfg-num"></select>',
-            '  </div>',
-            '  <label class="nme-cfg-check"><input id="nme-cfg-zhui" type="checkbox"> 界面中文化</label>',
-            '  <label class="nme-cfg-check"><input id="nme-cfg-badges" type="checkbox"> 模组语言徽章</label>',
+            '  <details class="nme-cfg-group" data-sec="ui">',
+            '    <summary class="nme-cfg-section">界面</summary>',
+            '    <div class="nme-cfg-row">',
+            '      <span class="nme-cfg-label">每页条数</span>',
+            '      <select id="nme-cfg-pagesize" class="nme-cfg-num"></select>',
+            '    </div>',
+            '    <label class="nme-cfg-check"><input id="nme-cfg-zhui" type="checkbox"> 界面中文化</label>',
+            '    <label class="nme-cfg-check"><input id="nme-cfg-badges" type="checkbox"> 模组语言徽章</label>',
+            '  </details>',
 
-            '  <div class="nme-cfg-section" data-sec="ai">AI（翻译 / 分析）</div>',
-            '  <div class="nme-ai-modal-help">兼容 OpenAI / DeepSeek 的 <code>/chat/completions</code> 接口。Key 只保存在本机脚本存储里，仅发送模组文本，不发送 Nexus Cookie。</div>',
-            '  <label class="nme-ai-field"><span>API 地址</span><input id="nme-cfg-url" type="text" spellcheck="false"></label>',
-            '  <label class="nme-ai-field"><span>API Key</span><input id="nme-cfg-key" type="password" spellcheck="false" placeholder="sk-..."></label>',
-            '  <label class="nme-ai-field"><span>模型</span><input id="nme-cfg-model" type="text" spellcheck="false" placeholder="deepseek-chat"></label>',
+            '  <details class="nme-cfg-group" data-sec="ai">',
+            '    <summary class="nme-cfg-section">AI（翻译 / 分析）</summary>',
+            '    <div class="nme-ai-modal-help">兼容 OpenAI / DeepSeek 的 <code>/chat/completions</code> 接口。Key 只保存在本机脚本存储里，仅发送模组文本，不发送 Nexus Cookie。</div>',
+            '    <label class="nme-ai-field"><span>API 地址</span><input id="nme-cfg-url" type="text" spellcheck="false"></label>',
+            '    <label class="nme-ai-field"><span>API Key</span><input id="nme-cfg-key" type="password" spellcheck="false" placeholder="sk-..."></label>',
+            '    <label class="nme-ai-field"><span>模型</span><input id="nme-cfg-model" type="text" spellcheck="false" placeholder="deepseek-chat"></label>',
+            // 测试按钮属于 AI 配置本身，放进本分组；折叠时看不到，但展开即可用
+            '    <div class="nme-cfg-row nme-cfg-row-end">',
+            '      <button id="nme-cfg-test" class="nme-ai-btn" type="button">测试 AI 连通性</button>',
+            '    </div>',
+            '  </details>',
 
             '  <div class="nme-ai-modal-foot">',
             '    <span id="nme-cfg-status" class="nme-ai-status"></span>',
-            '    <button id="nme-cfg-test" class="nme-ai-btn" type="button">测试 AI</button>',
             '    <button id="nme-cfg-cancel" class="nme-ai-btn" type="button">取消</button>',
             '    <button id="nme-cfg-save" class="nme-ai-btn nme-ai-btn-accent" type="button">保存</button>',
             '  </div>',
@@ -1659,10 +1661,13 @@
             }
         });
 
-        // 从 AI 相关入口打开时，把视图滚到 AI 区，免得用户还得自己找
+        // 从 AI 相关入口打开时，先展开 AI 分组再滚过去，否则折叠状态下根本看不到输入框
         if (focusSection === 'ai') {
-            const aiSection = modal.querySelector('.nme-cfg-section[data-sec="ai"]');
-            if (aiSection && aiSection.scrollIntoView) aiSection.scrollIntoView({ block: 'nearest' });
+            const aiGroup = modal.querySelector('.nme-cfg-group[data-sec="ai"]');
+            if (aiGroup) {
+                aiGroup.open = true;
+                if (aiGroup.scrollIntoView) aiGroup.scrollIntoView({ block: 'nearest' });
+            }
         }
     }
 
@@ -4817,8 +4822,8 @@
             capBtn.classList.toggle('nme-cap-on', view === 'enhanced');
             capBtn.setAttribute('aria-pressed', view === 'enhanced' ? 'true' : 'false');
             capBtn.setAttribute('title', view === 'enhanced'
-                ? '当前：增强视图（已开启）· 点击展开快捷操作'
-                : '当前：原生视图（增强已关闭）· 点击展开快捷操作');
+                ? '当前：增强视图（已开启）· 点击切换到原生视图'
+                : '当前：原生视图（增强已关闭）· 点击切换到增强视图');
         }
         if (capText) capText.textContent = (view === 'enhanced') ? '增强视图' : '原生视图';
         if (capDot) capDot.classList.toggle('nme-cap-dot-native', view !== 'enhanced');
@@ -4848,166 +4853,23 @@
      */
     function mountCapsule() {
         if ($('#nme-cap-btn')) return;
-        const ctx = state.ctx;
-        const mode = ctx ? ctx.mode : null;
-        const isList = mode === 'list' || mode === 'search';
-
-        // 与浮动按钮坞共用同一个容器，避免两个独立 fixed 元素互相遮挡
         const dock = ensureDock();
-
-        // 收起态按钮
         const btn = el('button', { id: 'nme-cap-btn' });
         btn.type = 'button';
         btn.innerHTML =
             '<span id="nme-cap-dot" class="nme-cap-dot" aria-hidden="true"></span>' +
-            '<span id="nme-cap-text">增强视图</span>' +
-            '<span class="nme-cap-caret" aria-hidden="true">▾</span>';
-
-        // 展开态面板
-        const panel = el('div', { id: 'nme-cap-panel' });
-        panel.setAttribute('role', 'dialog');
-        panel.setAttribute('aria-label', 'N网增强 快捷操作');
-
-        let body = '';
-        body += '<div class="nme-cap-head"><span class="nme-cap-title">N网增强 · 快捷操作</span>' +
-            '<button class="nme-cap-close" type="button" aria-label="关闭">✕</button></div>';
-
-        // 视图切换（所有页面都有）
-        body += '<div class="nme-cap-row nme-cap-mode">';
-        body += '<button class="nme-cap-btn2 nme-cap-view" data-view="enhanced" type="button">增强视图</button>';
-        body += '<button class="nme-cap-btn2 nme-cap-view" data-view="native" type="button">原生视图</button>';
-        body += '</div>';
-        body += '<div class="nme-cap-sep"></div>';
-
-        if (isList) {
-            // 每页条数
-            body += '<div class="nme-cap-row"><span class="nme-cap-label">每页</span>';
-            PAGE_SIZES.forEach(function (s) {
-                body += '<button class="nme-cap-btn2 nme-cap-size" data-size="' + s + '" type="button">' + s + '</button>';
-            });
-            body += '</div>';
-
-            // 快捷筛选
-            body += '<div class="nme-cap-row"><span class="nme-cap-label">筛选</span>';
-            body += '<button class="nme-cap-chip nme-cap-fchip" data-chip="zh" type="button">简中</button>';
-            body += '<button class="nme-cap-chip nme-cap-fchip" data-chip="zht" type="button">繁中</button>';
-            body += '<button class="nme-cap-chip nme-cap-fchip" data-chip="tr" type="button">翻译</button>';
-            body += '<button class="nme-cap-chip nme-cap-fchip" data-chip="hot" type="button">热门</button>';
-            body += '</div>';
-
-            // 排序
-            body += '<div class="nme-cap-row"><span class="nme-cap-label">排序</span>';
-            body += '<select class="nme-cap-btn2 nme-cap-sort" style="flex:1;min-width:0;">';
-            SORTS.forEach(function (s) {
-                body += '<option value="' + s[0] + '"' + (CFG.sortBy === s[0] ? ' selected' : '') + '>' + s[1] + '</option>';
-            });
-            body += '</select>';
-            body += '<button class="nme-cap-btn2 nme-cap-dir" type="button">' + (CFG.sortDir === 'DESC' ? '降序' : '升序') + '</button>';
-            body += '</div>';
-            body += '<div class="nme-cap-sep"></div>';
-
-            // AI 解读本页
-            body += '<div class="nme-cap-row">';
-            body += '<button class="nme-cap-btn2 nme-cap-ai nme-cap-digest" type="button" style="flex:1;">✦ AI 解读本页</button>';
-            body += '</div>';
-        }
-        // 详情页 / 合集页的 AI 与下载入口已移到右下角浮动按钮坞，这里不再重复
-
-        // 通用：AI 配置
-        body += '<div class="nme-cap-row">';
-        body += '<button class="nme-cap-btn2 nme-cap-aicfg" type="button" style="flex:1;">⚙ AI 接口配置</button>';
-        body += '</div>';
-
-        body += '<div class="nme-cap-hint">点击胶囊按钮可收起；列表/搜索页的快捷操作即时生效。</div>';
-
-        panel.innerHTML = body;
-        dock.appendChild(panel);
-        dock.appendChild(btn);
-
-        // —— 事件绑定 ——
-        btn.addEventListener('click', function (e) {
+            '<span id="nme-cap-text">增强视图</span>';
+        // 点击胶囊直接在「增强视图 / 原生视图」之间切换，不再弹快捷操作面板：
+        // 面板里的每页/筛选/排序在列表页顶部工具条本来就有，AI 配置也已在脚本设置面板里，
+        // 保留一个只做视图切换的按钮，比维持一份重复的操作区更简单。
+        on(btn, 'click', function (e) {
             e.stopPropagation();
-            // 面板互斥：打开快捷面板时收起 AI/下载面板
-            if (!dock.classList.contains('nme-cap-open')) closeFab();
-            dock.classList.toggle('nme-cap-open');
+            setView(CFG.view === 'enhanced' ? 'native' : 'enhanced');
         });
-        const closeBtn = panel.querySelector('.nme-cap-close');
-        if (closeBtn) closeBtn.addEventListener('click', function () { dock.classList.remove('nme-cap-open'); });
-
-        // 视图切换
-        panel.querySelectorAll('.nme-cap-view').forEach(function (b) {
-            b.addEventListener('click', function () {
-                const v = this.getAttribute('data-view');
-                if (v === 'enhanced' || v === 'native') setView(v);
-                dock.classList.remove('nme-cap-open');
-            });
-        });
-
-        if (isList) {
-            // 每页条数
-            panel.querySelectorAll('.nme-cap-size').forEach(function (b) {
-                b.addEventListener('click', function () {
-                    const s = parseInt(this.getAttribute('data-size'), 10);
-                    if (PAGE_SIZES.indexOf(s) >= 0) {
-                        CFG.pageSize = s;
-                        saveCfg();
-                        refreshCapsule();
-                        loadPage(true);
-                    }
-                });
-            });
-            // 快捷筛选
-            panel.querySelectorAll('.nme-cap-fchip').forEach(function (b) {
-                b.addEventListener('click', function () {
-                    const k = this.getAttribute('data-chip');
-                    state.chips[k] = !state.chips[k];
-                    CFG.chips = normChips(state.chips);
-                    saveCfg();
-                    refreshCapsule();
-                    // 同步顶部工具条的 chip 状态
-                    const tb = $('#nme-panel .nme-chip[data-chip="' + k + '"]');
-                    if (tb) tb.classList.toggle('nme-chip-on', state.chips[k]);
-                    loadPage(true);
-                });
-            });
-            // 排序
-            const sortSel = panel.querySelector('.nme-cap-sort');
-            if (sortSel) sortSel.addEventListener('change', function () {
-                CFG.sortBy = this.value;
-                saveCfg();
-                // 同步顶部下拉
-                const tb = $('#nme-sort');
-                if (tb) tb.value = CFG.sortBy;
-                loadPage(true);
-            });
-            const dirBtn = panel.querySelector('.nme-cap-dir');
-            if (dirBtn) dirBtn.addEventListener('click', function () {
-                CFG.sortDir = CFG.sortDir === 'DESC' ? 'ASC' : 'DESC';
-                this.textContent = CFG.sortDir === 'DESC' ? '降序' : '升序';
-                saveCfg();
-                const tb = $('#nme-dir');
-                if (tb) tb.textContent = CFG.sortDir === 'DESC' ? '降序' : '升序';
-                loadPage(true);
-            });
-            // AI 解读本页
-            const digestBtn = panel.querySelector('.nme-cap-digest');
-            if (digestBtn) digestBtn.addEventListener('click', function () {
-                dock.classList.remove('nme-cap-open');
-                runPageDigest();
-            });
-        }
-
-        // AI 配置
-        const aicfgBtn = panel.querySelector('.nme-cap-aicfg');
-        if (aicfgBtn) aicfgBtn.addEventListener('click', function () {
-            dock.classList.remove('nme-cap-open');
-            openAiSettings();
-        });
-
+        dock.appendChild(btn);
         refreshCapsule();
     }
 
-    /** 同步胶囊里各按钮的激活态（视图、每页条数、筛选、排序方向） */
     function refreshCapsule() {
         const cap = $('#nme-dock');
         if (!cap) return;
@@ -5041,8 +4903,13 @@
 
     // ==================== 样式 ====================
 
-    function addStyle() {
-        const css = [
+    /**
+     * 全站样式表（纯字符串，不含注入逻辑）。
+     * 从 addStyle 里拆出来：样式 270 行、注入只有两行，
+     * 混在一起时既难查阅也难校验，分开后各自职责清楚。
+     */
+    function buildStyleCss() {
+        return [
             'body.nme-view-enhanced [data-nme-native="1"]{display:none !important;}',
             'body.nme-view-enhanced .mods-grid{display:none !important;}',
             'body.nme-view-native #nme-toolbar,body.nme-view-native #nme-grid,',
@@ -5136,34 +5003,6 @@
             '#nme-cap-btn.nme-cap-on{border-color:rgba(63,166,106,.65);}',
             '#nme-cap-btn .nme-cap-dot{width:9px;height:9px;border-radius:50%;background:#3fa66a;box-shadow:0 0 0 3px rgba(63,166,106,.2);transition:background .2s;}',
             '#nme-cap-btn .nme-cap-dot.nme-cap-dot-native{background:#e0a33c;box-shadow:0 0 0 3px rgba(224,163,60,.22);}',
-            '#nme-cap-btn .nme-cap-caret{opacity:.55;font-size:.8em;line-height:1;transition:transform .2s;}',
-            '#nme-dock.nme-cap-open #nme-cap-btn .nme-cap-caret{transform:rotate(180deg);opacity:.9;}',
-            '#nme-cap-panel{position:absolute;right:0;bottom:calc(100% + .5rem);z-index:1;',
-            '  width:min(20rem,82vw);max-height:70vh;overflow-y:auto;padding:.75rem;border-radius:1rem;',
-            '  border:1px solid rgba(255,255,255,.22);background:rgba(22,22,26,.97);color:#eee;',
-            '  box-shadow:0 10px 36px rgba(0,0,0,.6);backdrop-filter:blur(12px);',
-            '  opacity:0;transform:translateY(6px) scale(.98);pointer-events:none;transition:opacity .18s ease,transform .18s ease;}',
-            '#nme-dock.nme-cap-open #nme-cap-panel{opacity:1;transform:translateY(0) scale(1);pointer-events:auto;}',
-            '#nme-cap-panel .nme-cap-row{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;margin-bottom:.55rem;}',
-            '#nme-cap-panel .nme-cap-row:last-child{margin-bottom:0;}',
-            '#nme-cap-panel .nme-cap-label{font-size:.75rem;opacity:.6;white-space:nowrap;min-width:3.2rem;}',
-            '#nme-cap-panel .nme-cap-btn2{background:rgba(255,255,255,.06);color:inherit;border:1px solid rgba(255,255,255,.18);',
-            '  border-radius:999px;padding:.28rem .7rem;font-size:.78rem;cursor:pointer;line-height:1.2;white-space:nowrap;}',
-            '#nme-cap-panel .nme-cap-btn2:hover{background:rgba(255,255,255,.13);}',
-            '#nme-cap-panel .nme-cap-btn2.nme-cap-active{background:#3fa66a;border-color:#3fa66a;color:#06130b;font-weight:600;}',
-            '#nme-cap-panel .nme-cap-chip{background:transparent;color:inherit;border:1px solid rgba(255,255,255,.2);',
-            '  border-radius:999px;padding:.24rem .65rem;font-size:.75rem;cursor:pointer;}',
-            '#nme-cap-panel .nme-cap-chip.nme-cap-on{background:#d34a4a;border-color:#d34a4a;color:#fff;}',
-            '#nme-cap-panel .nme-cap-ai{background:rgba(211,74,74,.16);border-color:rgba(211,74,74,.5);color:#f3b4b4;}',
-            '#nme-cap-panel .nme-cap-ai:hover{background:rgba(211,74,74,.28);}',
-            '#nme-cap-panel .nme-cap-sep{height:1px;background:rgba(255,255,255,.14);margin:.55rem 0;}',
-            '#nme-cap-panel .nme-cap-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:.35rem;}',
-            '#nme-cap-panel .nme-cap-title{font-size:.8rem;font-weight:700;color:#d34a4a;}',
-            '#nme-cap-panel .nme-cap-close{background:none;border:none;color:rgba(255,255,255,.5);cursor:pointer;font-size:1rem;line-height:1;padding:0 .2rem;}',
-            '#nme-cap-panel .nme-cap-close:hover{color:#fff;}',
-            '#nme-cap-panel .nme-cap-mode{display:flex;gap:.3rem;}',
-            '#nme-cap-panel .nme-cap-mode button{flex:1;}',
-            '#nme-cap-panel .nme-cap-hint{font-size:.7rem;opacity:.5;margin-top:.3rem;line-height:1.4;}',
             // 提示条放左下角：右下角被统一浮动坞占用，避免盖住按钮
             '#nme-toast{position:fixed;left:16px;bottom:16px;z-index:10000;max-width:min(22rem,80vw);',
             '  padding:.6rem .8rem;border-radius:.55rem;border:1px solid rgba(255,255,255,.2);',
@@ -5257,9 +5096,20 @@
             '#nme-ai-cfg-modal .nme-ai-modal-help{font-size:.78rem;line-height:1.6;opacity:.7;margin-bottom:.8rem;}',
             '#nme-ai-cfg-modal code{background:rgba(255,255,255,.1);padding:.05rem .3rem;border-radius:.2rem;}',
             '#nme-ai-cfg-modal .nme-ai-field{display:flex;flex-direction:column;gap:.25rem;margin-bottom:.6rem;}',
-            '#nme-ai-cfg-modal .nme-cfg-section{font-weight:700;font-size:.82rem;margin:1rem 0 .55rem;padding-top:.65rem;border-top:1px solid rgba(255,255,255,.1);}',
-            '#nme-ai-cfg-modal .nme-cfg-section:first-of-type{margin-top:.3rem;padding-top:0;border-top:none;}',
+            // 折叠分组：边框放分组容器上，标题行只做可点击的 summary
+            '#nme-ai-cfg-modal .nme-cfg-group{border-top:1px solid rgba(255,255,255,.1);}',
+            '#nme-ai-cfg-modal .nme-cfg-group:first-of-type{border-top:none;}',
+            '#nme-ai-cfg-modal .nme-cfg-section{display:flex;align-items:center;justify-content:space-between;',
+            '  cursor:pointer;list-style:none;font-weight:700;font-size:.82rem;padding:.62rem 0;user-select:none;}',
+            '#nme-ai-cfg-modal .nme-cfg-section::-webkit-details-marker{display:none;}',
+            // 纯 CSS 箭头：一段折角边框旋转 45°，展开时转回来
+            '#nme-ai-cfg-modal .nme-cfg-section::after{content:"";width:.45rem;height:.45rem;',
+            '  border-right:2px solid currentColor;border-bottom:2px solid currentColor;',
+            '  transform:rotate(45deg);opacity:.55;transition:transform .18s;margin-right:.2rem;}',
+            '#nme-ai-cfg-modal .nme-cfg-group[open] .nme-cfg-section::after{transform:rotate(-135deg);}',
+            '#nme-ai-cfg-modal .nme-cfg-group[open]{padding-bottom:.55rem;}',
             '#nme-ai-cfg-modal .nme-cfg-row{display:flex;align-items:center;justify-content:space-between;gap:.6rem;margin-bottom:.5rem;}',
+            '#nme-ai-cfg-modal .nme-cfg-row-end{justify-content:flex-end;margin-top:.15rem;}',
             '#nme-ai-cfg-modal .nme-cfg-label{font-size:.8rem;opacity:.8;}',
             '#nme-ai-cfg-modal .nme-cfg-num{width:7rem;padding:.35rem .5rem;border-radius:.4rem;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:inherit;font-size:.82rem;}',
             '#nme-ai-cfg-modal .nme-cfg-check{display:flex;align-items:center;gap:.45rem;font-size:.82rem;margin-bottom:.45rem;cursor:pointer;}',
@@ -5332,7 +5182,11 @@
             '#nme-dl-bar .nme-dl-log-ok{color:#69c08a;}',
             '#nme-dl-bar .nme-dl-log-warn{color:#e0a33c;}'
         ].join('\n');
-        GM_addStyle(css);
+    }
+
+    /** 把样式表注入页面（只做注入，样式内容见 buildStyleCss） */
+    function addStyle() {
+        GM_addStyle(buildStyleCss());
     }
 
     // ==================== 启动 ====================
