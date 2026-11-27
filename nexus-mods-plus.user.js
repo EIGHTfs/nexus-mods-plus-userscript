@@ -2,9 +2,9 @@
 // @name         Nexus Mods 增强
 // @name:en      Nexus Mods Enhancer
 // @namespace    nexusmods-enhancer
-// @version      1.6.1
-// @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下，支持断点续传；脚本设置面板集中管理下载/界面/AI），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
-// @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable, with a unified settings panel), collection batch download with progress/pause/resume, and update highlighting in download history.
+// @version      1.6.2
+// @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下，支持断点续传；脚本设置面板集中管理下载/界面/AI，文件页下载面板标出已下载的 mod），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
+// @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable, with a unified settings panel and downloaded-file markers), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
 // @author       SmallRob
 // @match        https://www.nexusmods.com/*
@@ -31,7 +31,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.6.1';
+    const VERSION = '1.6.2';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -3177,6 +3177,63 @@
         }
     }
 
+    /** 文件名归一：折叠空白 + 转小写，用于「页面上的文件名」与接口返回的文件名对号 */
+    function normalizeFileName(raw) {
+        return String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    }
+
+    /**
+     * 读取页面文件行里的「已下载」状态。
+     *
+     * Nexus 对登录账号会渲染两个已下载信号：
+     *   ① <li class="stat-downloaded">（统计区里带 Downloaded 日期）
+     *   ② <i class="material-icons" title="You downloaded this mod file on ...">cloud_download</i>
+     * 两个都认，任何一个存在即算下载过，避免单点改版失效。
+     *
+     * 文件行里没有 fileId（只有文件名 <p> 与统计区），所以用文件名做匹配键；
+     * 若外层将来出现 data-file-id，也一并收下，fileId 命中优先。
+     */
+    function collectDownloadedFilesFromPage() {
+        const byFileId = {};
+        const byName = {};
+        const markers = [];
+        const pushMarker = function (node) { if (node && markers.indexOf(node) < 0) markers.push(node); };
+        const downloadedStats = document.querySelectorAll('li.stat-downloaded');
+        for (let i = 0; i < downloadedStats.length; i++) pushMarker(downloadedStats[i]);
+        const downloadedIcons = document.querySelectorAll('i.material-icons[title*="downloaded"], i.material-icons[title*="下载"]');
+        for (let i = 0; i < downloadedIcons.length; i++) pushMarker(downloadedIcons[i]);
+
+        markers.forEach(function (marker) {
+            // 向上找「文件行」容器：特征是同时含文件名 <p> 与统计区 .file-download-stats
+            let row = marker.parentElement;
+            for (let depth = 0; depth < 10 && row; depth++) {
+                if (row.querySelector && row.querySelector('p') && row.querySelector('.file-download-stats')) break;
+                row = row.parentElement;
+            }
+            if (!row || !row.querySelector) return;
+            const idHost = row.closest('[data-file-id]');
+            if (idHost) {
+                const id = idHost.getAttribute('data-file-id');
+                if (id) byFileId[String(id)] = true;
+            }
+            const nameEl = row.querySelector('p');
+            const name = nameEl ? nameEl.textContent : '';
+            if (normalizeFileName(name)) byName[normalizeFileName(name)] = true;
+        });
+        return { byFileId: byFileId, byName: byName };
+    }
+
+    /**
+     * 判断某个文件是否在「页面已下载集合」里。
+     * fileId 命中优先；页面文件行没有 fileId 时退回文件名比对。
+     */
+    function isFileDownloaded(downloaded, file) {
+        if (!downloaded || !file) return false;
+        if (file.fileId != null && downloaded.byFileId[String(file.fileId)]) return true;
+        const key = normalizeFileName(file.name || '');
+        return !!key && downloaded.byName[key] === true;
+    }
+
     function renderDetailFiles(files) {
         const list = $('#nme-dl-list');
         if (!list) return;
@@ -3184,8 +3241,12 @@
             list.innerHTML = '<div class="nme-dl-empty">该模组还没有公开文件。</div>';
             return;
         }
+        // 把页面上「Downloaded」状态同步过来，省得用户自己在页面和面板之间来回对
+        const downloaded = collectDownloadedFilesFromPage();
+        const isDownloaded = function (file) { return isFileDownloaded(downloaded, file); };
         list.innerHTML = files.map(function (f, i) {
             const tag = f.category ? '<span class="nme-dl-tag">' + escapeHtml(f.category) + '</span>' : '';
+            const doneTag = isDownloaded(f) ? '<span class="nme-dl-done">已下载</span>' : '';
             const meta = [
                 f.version ? '版本 ' + f.version : '',
                 f.sizeInBytes ? fmtSize(f.sizeInBytes) : '',
@@ -3193,7 +3254,7 @@
             ].filter(Boolean).join(' · ');
             return '<div class="nme-dl-row">' +
                 '<div class="nme-dl-main">' +
-                '<div class="nme-dl-name">' + escapeHtml(f.name || ('文件 #' + f.fileId)) + tag + '</div>' +
+                '<div class="nme-dl-name">' + escapeHtml(f.name || ('文件 #' + f.fileId)) + tag + doneTag + '</div>' +
                 '<div class="nme-dl-meta">' + escapeHtml(meta) + '</div>' +
                 '</div>' +
                 '<button class="nme-dl-btn nme-dl-go" type="button" data-idx="' + i + '">一键下载</button>' +
@@ -4754,6 +4815,10 @@
             '#nme-dl-bar .nme-dl-opt input:disabled{cursor:not-allowed;opacity:.45;}',
             '#nme-dl-bar .nme-dl-tag{display:inline-block;font-size:.6875rem;border:1px solid currentColor;',
             '  border-radius:.2rem;padding:0 .25rem;margin-left:.35rem;opacity:.8;vertical-align:middle;}',
+            // 「已下载」徽章：实心绿底，和描边的分类标签区分开，一眼能看出下没下过
+            '#nme-dl-bar .nme-dl-done{display:inline-block;font-size:.6875rem;border-radius:.2rem;',
+            '  padding:0 .3rem;margin-left:.35rem;vertical-align:middle;background:rgba(105,192,138,.18);',
+            '  color:#69c08a;border:1px solid rgba(105,192,138,.45);}',
             '#nme-dl-bar .nme-dl-empty{font-size:.8125rem;opacity:.7;}',
             '#nme-dl-bar .nme-dl-err{color:#ff8a8a;opacity:1;}',
             '#nme-dl-bar .nme-dl-prog{height:6px;border-radius:3px;background:rgba(255,255,255,.12);',
