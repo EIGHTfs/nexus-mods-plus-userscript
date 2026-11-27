@@ -211,6 +211,24 @@ check('Content-Range：格式异常不崩',
     [dlTotalFromContentRange('garbage'), dlStartFromContentRange('garbage')],
     [0, -1]);
 
+// ---------- 站点真名的 -fileId-版本-时间戳 后缀必须完整保留 ----------
+check('文件名：CDN 真名的后缀完整保留（-fileId-版本-时间戳）',
+    pickDownloadFileName({ name: 'Shadow_Ka skimpy', version: '1.1' },
+        'https://cdn.example.com/5577/22/Shadow_Ka skimpy-716-1-0-1754482857.zip?md5=x',
+        'Mauxir'),
+    'Shadow_Ka skimpy-716-1-0-1754482857.zip');
+check('文件名：兜底名按站点风格拼（文件名-fileId-版本）',
+    pickDownloadFileName({ name: 'Shadow_Ka skimpy', version: '1.0.0' },
+        'https://www.nexusmods.com/Core/Libs/Common/Widgets/DownloadFile?file_id=41',
+        'Mauxir', '', 41),
+    'Shadow_Ka skimpy-41-1-0-0.zip');
+check('文件名：同名的两个版本兜底名不同（靠 fileId 区分）',
+    [
+        pickDownloadFileName({ name: 'Same', version: '1.0.0' }, 'https://x/DownloadFile', 'M', '', 41),
+        pickDownloadFileName({ name: 'Same', version: '1.1' }, 'https://x/DownloadFile', 'M', '', 1555)
+    ],
+    ['Same-41-1-0-0.zip', 'Same-1555-1-1.zip']);
+
 const failed = results.filter((r) => !r.ok);
 console.log('\n结果：' + (results.length - failed.length) + '/' + results.length + ' 通过');
 process.exit(failed.length ? 1 : 0);

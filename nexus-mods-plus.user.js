@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强（下载增强版）
 // @name:en      Nexus Mods Enhancer (Download Enhanced)
 // @namespace    nexusmods-enhancer-e8
-// @version      1.6.4
+// @version      1.6.5
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，压缩包与预览图归档进同一目录，图片也可单独下，支持断点续传；脚本设置面板集中管理下载/界面/AI，文件页下载面板标出已下载的 mod），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable, with a unified settings panel and downloaded-file markers), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -37,7 +37,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.6.4';
+    const VERSION = '1.6.5';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -2079,8 +2079,11 @@
                 loadedBytes = buffer.byteLength;
                 await dlWriteBuffer(dirHandle, fileName, buffer);
             } else {
-                const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-                createdName = fileName;
+                // 同名文件不覆盖：生成 xxx (1).zip 这样的名字，与浏览器下载行为一致
+                const uniqueName = await dlUniquifyName(dirHandle, fileName);
+                finalName = uniqueName;
+                const fileHandle = await dirHandle.getFileHandle(uniqueName, { create: true });
+                createdName = uniqueName;
                 const writable = await fileHandle.createWritable();
                 const total = Number(response.headers.get('content-length') || 0);
                 const reader = response.body.getReader();
@@ -2217,6 +2220,32 @@
         const writable = await fileHandle.createWritable();
         await writable.write(data);
         await writable.close();
+    }
+
+    /**
+     * 目标目录里若已有同名文件，生成不冲突的名字（`xxx (1).zip`）。
+     * 与浏览器原生下载行为一致：不覆盖已有文件。
+     * 正常情况不会触发——N 网 CDN 真名自带 fileId 与版本；
+     * 只有拿不到真名、退回兜底名时，同 mod 的同名文件才会撞名。
+     */
+    async function dlUniquifyName(dirHandle, fileName) {
+        const exists = async function (name) {
+            try {
+                await dirHandle.getFileHandle(name);   // 不带 create：存在即成功
+                return true;
+            } catch (e) {
+                return false;
+            }
+        };
+        if (!(await exists(fileName))) return fileName;
+        const dot = fileName.lastIndexOf('.');
+        const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
+        const ext = dot > 0 ? fileName.slice(dot) : '';
+        for (let i = 1; i <= 50; i++) {
+            const candidate = stem + ' (' + i + ')' + ext;
+            if (!(await exists(candidate))) return candidate;
+        }
+        return stem + ' (' + Date.now() + ')' + ext;
     }
 
     /** 删掉失败时留下的空文件，避免磁盘上出现 0 字节压缩包 */
@@ -2556,7 +2585,9 @@
         const opfsRoot = await navigator.storage.getDirectory();
         const partHandle = await opfsRoot.getFileHandle(partName);
         const file = await partHandle.getFile();
-        const targetHandle = await dirHandle.getFileHandle(finalName, { create: true });
+        // 同名不覆盖，避免把目录里已有的同名文件盖掉
+        const targetName = await dlUniquifyName(dirHandle, finalName);
+        const targetHandle = await dirHandle.getFileHandle(targetName, { create: true });
         const writable = await targetHandle.createWritable();
         try {
             if (file.stream && typeof file.stream === 'function') {
@@ -2571,7 +2602,7 @@
             throw err;
         }
         try { await opfsRoot.removeEntry(partName); } catch (ignored) { /* 删不掉不影响结果 */ }
-        return finalName;
+        return targetName;
     }
 
     // ---------- 页面可见性：切后台优雅暂停 ----------
@@ -2728,7 +2759,7 @@
      * Nexus 的 file.name 经常没有扩展名（如 "Siris-FreeFin_Azure Drift_a little naughty"），
      * 直接当文件名会存成无后缀文件、双击打不开 —— 所以按「原名 → 直链末段 → mod 名+版本」三级兜底。
      */
-    function pickDownloadFileName(file, url, modTitle, apiFileName) {
+    function pickDownloadFileName(file, url, modTitle, apiFileName, fileId) {
         // 优先级：接口给的真实文件名 → 文件标题 → 直链末段 → mod 名+版本兜底
         const fromApi = String(apiFileName || '').trim();
         const declared = String((file && file.name) || '').trim();
@@ -2741,7 +2772,12 @@
         // 扩展名从直链末段借，借不到按 .zip 处理（Nexus 绝大多数 mod 文件是 zip）。
         const urlExt = (fromUrl.match(/\.([a-z0-9]{1,8})$/i) || [])[1];
         const base = sanitizeFolderName(declared || modTitle, 'file');
-        return base + '.' + (urlExt || 'zip');
+        // 兜底名按站点风格拼：<文件名>-<fileId>-<版本点转横>，例如 xxx-716-1-0
+        // 站点真名是 <文件名>-<fileId>-<版本>-<时间戳>（如 -716-1-0-1754482857），
+        // 我们拿不到时间戳，但保持前缀风格一致；同时 fileId 保证同 mod 同名文件不会撞。
+        const versionPart = (file && file.version) ? '-' + String(file.version).replace(/\./g, '-') : '';
+        const withId = fileId ? base + '-' + fileId + versionPart : base;
+        return withId + '.' + (urlExt || 'zip');
     }
 
     /**
@@ -2890,7 +2926,8 @@
                 { name: opts.fileName, version: opts.version },
                 url,
                 modTitle,
-                domFileName || resolved.filename
+                domFileName || resolved.filename,
+                opts.fileId
             ),
             'file.zip'
         );
@@ -3293,6 +3330,28 @@
     function collectDownloadedFilesFromPage() {
         const byFileId = {};
         const byName = {};
+
+        // 主路径：N 网新版文件行是 <dt class="file-expander-header" data-id="<fileId>">，
+        // data-id 与 GraphQL 的 fileId 是同一套 ID（实测 modId=22：页面 41/1555 对应接口 41/1555）。
+        // 用它可以精确区分「同一 mod 内同名的不同版本文件」，按文件名匹配会把它们混为一谈。
+        const headers = document.querySelectorAll('dt.file-expander-header[data-id]');
+        let hasRowStructure = false;
+        for (let i = 0; i < headers.length; i++) {
+            const row = headers[i];
+            const id = row.getAttribute('data-id');
+            if (!id) continue;
+            hasRowStructure = true;
+            const marked = row.querySelector('li.stat-downloaded') ||
+                row.querySelector('i.material-icons[title*="downloaded"]') ||
+                row.querySelector('i.material-icons[title*="下载"]');
+            if (marked) byFileId[String(id)] = true;
+        }
+
+        // 只要页面出现带 data-id 的文件行，就完全以 fileId 为准，不再按文件名兜底，
+        // 否则同名文件（如 v1.0.0 与 v1.1 都叫同一个名字）会被误标。
+        if (hasRowStructure) return { byFileId: byFileId, byName: byName };
+
+        // 旧结构兜底：页面没有 data-id 文件行时，退回文件名匹配
         const markers = [];
         const pushMarker = function (node) { if (node && markers.indexOf(node) < 0) markers.push(node); };
         const downloadedStats = document.querySelectorAll('li.stat-downloaded');
@@ -3301,7 +3360,6 @@
         for (let i = 0; i < downloadedIcons.length; i++) pushMarker(downloadedIcons[i]);
 
         markers.forEach(function (marker) {
-            // 向上找「文件行」容器：特征是同时含文件名 <p> 与统计区 .file-download-stats
             let row = marker.parentElement;
             for (let depth = 0; depth < 10 && row; depth++) {
                 if (row.querySelector && row.querySelector('p') && row.querySelector('.file-download-stats')) break;
