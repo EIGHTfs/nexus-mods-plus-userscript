@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强（下载增强版）
 // @name:en      Nexus Mods Enhancer (Download Enhanced)
 // @namespace    nexusmods-enhancer-e8
-// @version      1.6.7
+// @version      1.6.8
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，压缩包与预览图归档进同一目录，图片也可单独下，支持断点续传；脚本设置面板集中管理下载/界面/AI，文件页下载面板标出已下载的 mod），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable, with a unified settings panel and downloaded-file markers), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -37,7 +37,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.6.7';
+    const VERSION = '1.6.8';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -2249,21 +2249,28 @@
      * 只有拿不到真名、退回兜底名时，同 mod 的同名文件才会撞名。
      */
     async function dlUniquifyName(dirHandle, fileName) {
-        const exists = async function (name) {
+        // 返回 'free'（不存在）/ 'empty'（存在但是 0 字节）/ 'taken'（存在且有内容）
+        const probe = async function (name) {
             try {
-                await dirHandle.getFileHandle(name);   // 不带 create：存在即成功
-                return true;
+                const handle = await dirHandle.getFileHandle(name);
+                const file = await handle.getFile();
+                return (Number(file.size) || 0) > 0 ? 'taken' : 'empty';
             } catch (e) {
-                return false;
+                return 'free';
             }
         };
-        if (!(await exists(fileName))) return fileName;
+        const first = await probe(fileName);
+        // 0 字节文件是上一次中断留下的空壳，没有任何内容值得保留：
+        // 直接复用这个名字覆盖它，否则每次重试都会多出一个「xxx (1).zip」，
+        // 空壳越攒越多，还让人以为下载出了两种文件。
+        if (first === 'free' || first === 'empty') return fileName;
         const dot = fileName.lastIndexOf('.');
         const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
         const ext = dot > 0 ? fileName.slice(dot) : '';
         for (let i = 1; i <= 50; i++) {
             const candidate = stem + ' (' + i + ')' + ext;
-            if (!(await exists(candidate))) return candidate;
+            const state = await probe(candidate);
+            if (state === 'free' || state === 'empty') return candidate;
         }
         return stem + ' (' + Date.now() + ')' + ext;
     }
@@ -5286,12 +5293,16 @@
             '  border-radius:.2rem;padding:0 .25rem;margin-left:.35rem;opacity:.8;vertical-align:middle;}',
             // 「已下载」徽章：实心绿底，和描边的分类标签区分开，一眼能看出下没下过
             // 总进度条：汇总所有进行中的下载，避免多个下载抢状态行那一个位置
-            '#nme-dl-bar .nme-dl-total{margin:.55rem 0 .15rem;}',
+            // 总进度条独占一行：它和按钮同处 flex-wrap 容器，若不占满整行，
+            // 文本一变长就会把后面的元素挤下去，导致布局在「一行」和「两行」之间反复跳
+            '#nme-dl-bar .nme-dl-total{flex:0 0 100%;width:100%;box-sizing:border-box;margin:.55rem 0 .15rem;}',
             '#nme-dl-bar .nme-dl-total-track{height:.375rem;background:rgba(255,255,255,.1);',
             '  border-radius:.1875rem;overflow:hidden;}',
             '#nme-dl-bar .nme-dl-total-bar{height:100%;width:0;border-radius:.1875rem;',
             '  transition:width .25s ease,background .25s ease;}',
-            '#nme-dl-bar .nme-dl-total-text{font-size:.6875rem;opacity:.72;margin-top:.22rem;}',
+            // 进度文字单行显示：换行会让这行高度变化，进而带动整块面板上下抖
+            '#nme-dl-bar .nme-dl-total-text{font-size:.6875rem;opacity:.72;margin-top:.22rem;',
+            '  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
             // 行内进度条：每个文件行一条，并发下载各走各的不互相覆盖
             '#nme-dl-bar .nme-dl-prog-wrap{margin-top:.45rem;}',
             '#nme-dl-bar .nme-dl-prog{height:.25rem;background:rgba(255,255,255,.12);border-radius:.125rem;overflow:hidden;}',
