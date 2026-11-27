@@ -34,10 +34,19 @@
 
 ### 安装
 
-1. 下载仓库里的 `nexus-mods-plus.user.js`
-2. 在脚本管理器（ScriptCat / Tampermonkey / Violentmonkey）里新建脚本，粘贴内容并保存
+ScriptCat 一键安装：
 
-仓库为私有，raw 链接需要 token 才能访问，因此不走一键安装。
+```
+https://scriptcat.org/zh-CN/script-show-page/9302
+```
+
+其他脚本管理器（Tampermonkey / Violentmonkey）手动导入：
+
+```
+https://raw.githubusercontent.com/EIGHTfs/nexus-mods-plus-userscript/main/nexus-mods-plus.user.js
+```
+
+安装前请先卸载原版「Nexus Mods 增强 1.3.3」，否则两个脚本会同时注入页面。
 
 ### 第一次使用
 
