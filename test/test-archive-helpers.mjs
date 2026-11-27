@@ -57,7 +57,9 @@ const functions = [
     'fileNameFromUrl',
     'pickDownloadFileName',
     'collectImagesFromDom',
-    'dlResolveFinalFileName'
+    'dlResolveFinalFileName',
+    'dlDispositionFileName',
+    'dlPickFileNameFromParts'
 ].map(extractFunction).join('\n\n');
 
 /** 最小 DOM 桩：只提供 collectImagesFromDom 用到的那点能力 */
@@ -137,9 +139,12 @@ check('文件名：声明名无扩展名 → 用直链末段（Nexus 真实情�
 check('文件名：声明名带扩展名 → 直接用声明名',
     pickDownloadFileName({ name: 'Patch v2.7z' }, cdnUrl, 'Siris'),
     'Patch v2.7z');
-check('文件名：两边都没扩展名 → mod 名+版本+.zip 兜底',
+check('文件名：两边都没扩展名 → 用 Nexus 文件标题 + .zip（不再拼 mod 标题与版本）',
     pickDownloadFileName({ name: 'NoExt', version: '1.0' }, 'https://cdn.example.com/downloads/1902', 'Siris'),
-    'Siris-1.0.zip');
+    'NoExt.zip');
+check('文件名：直链末段带扩展名时直接用直链名',
+    pickDownloadFileName({ name: 'SomeFile' }, 'https://cdn.example.com/x/abc.7z', 'Siris'),
+    'abc.7z');
 
 // ---------- 图片收集 ----------
 const images = collectImagesFromDom();
@@ -173,6 +178,21 @@ check('定名：URL 末段无扩展名时不误用',
     dlResolveFinalFileName(fakeResponse('', 'https://www.nexusmods.com/Core/Libs/Common/Widgets/DownloadFile'),
         'Real-868-1-2-1762417842.zip'),
     'Real-868-1-2-1762417842.zip');
+
+// ---------- GM_xhr 兜底通道定名（拿不到 Response 对象，只有头文本 + finalUrl） ----------
+const { dlPickFileNameFromParts } = context;
+check('兜底定名：从响应头文本取 Content-Disposition 文件名',
+    dlPickFileNameFromParts(
+        'HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename="Enya_Tempest-868-1-2-1762417842.zip"\r\n',
+        'https://supporter-files.nexus-cdn.com/5577/1056/other.bin',
+        'hint.zip'),
+    'Enya_Tempest-868-1-2-1762417842.zip');
+check('兜底定名：没有 CD 头时用 finalUrl 末段',
+    dlPickFileNameFromParts('', 'https://supporter-files.nexus-cdn.com/5577/1056/Enya-868-1-2-1762417842.zip?md5=x', 'hint.zip'),
+    'Enya-868-1-2-1762417842.zip');
+check('兜底定名：都拿不到才用提示名',
+    dlPickFileNameFromParts('', 'https://www.nexusmods.com/Core/Libs/Common/Widgets/DownloadFile', 'Real.zip'),
+    'Real.zip');
 
 const failed = results.filter((r) => !r.ok);
 console.log('\n结果：' + (results.length - failed.length) + '/' + results.length + ' 通过');

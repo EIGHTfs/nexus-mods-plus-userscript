@@ -60,14 +60,21 @@ const realHelpers = [
     'collectImagesFromDom',
     'collectArchiveImages',
     'archiveFolderPath',
-    'dlRootProblemText'
+    'dlRootProblemText',
+    'decodeDlUrl',
+    'pickRealFileNameFromDom'
 ].map(extractFunction).join('\n\n');
 
 const target = extractFunction('archiveDownload');
 
-const domStub = {
-    document: {
+function makeDomStub(options) {
+    return {
         querySelectorAll(selector) {
+            if (selector.indexOf('data-download-url') >= 0) {
+                // 只有用例显式给出时才模拟「文件页 DOM 里有直链」
+                if (!options.domDownloadUrl) return [];
+                return [{ getAttribute: () => options.domDownloadUrl }];
+            }
             if (selector.indexOf('thumbgallery') < 0) return [];
             return [
                 { getAttribute: (n) => (n === 'data-src' ? 'https://staticdelivery.nexusmods.com/mods/5577/images/868/868-1.png' : null) },
@@ -75,8 +82,8 @@ const domStub = {
                 { getAttribute: (n) => (n === 'data-src' ? 'https://staticdelivery.nexusmods.com/mods/5577/images/868/868-3.png' : null) }
             ];
         }
-    }
-};
+    };
+}
 
 const results = [];
 function check(name, actual, expected) {
@@ -93,7 +100,7 @@ async function runFlow(options) {
     const context = vm.createContext({
         URL,
         console,
-        document: domStub.document,
+        document: makeDomStub(options),
         CFG: Object.assign({ dlImagesWithMod: true, dlImgLimit: 12 }, options.cfg || {}),
         sleep: async () => {},
         // 桩：直链解析结果由用例决定
@@ -254,6 +261,19 @@ async function runFlow(options) {
     check('用例10：用接口文件名，不用 CDN 混淆名',
         calls[0],
         'Snowbreak_ Containment Zone/Agave/Vidya_Agave v1.2.7z');
+}
+
+// ---------- 用例 11：页面 DOM 的直链末段优先（站点自己的真名） ----------
+{
+    const { calls } = await runFlow({
+        directUrl: 'https://www.nexusmods.com/Core/Libs/Common/Widgets/DownloadFile?file_id=1902',
+        domDownloadUrl: 'https://supporter-files.nexus-cdn.com/5577/1056/Enya_Tempest(default)_a little naughty-868-1902-1-1762417842.zip?md5=x',
+        opts: { modTitle: 'Enya', gameName: 'Snowbreak: Containment Zone', fileName: 'Enya_Tempest(default)_a little naughty' },
+        cfg: { dlImagesWithMod: false }
+    });
+    check('用例11：用 DOM 直链末段的站点真名',
+        calls[0],
+        'Snowbreak_ Containment Zone/Enya/Enya_Tempest(default)_a little naughty-868-1902-1-1762417842.zip');
 }
 
 const failed = results.filter((r) => !r.ok);

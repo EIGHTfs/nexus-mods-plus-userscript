@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强
 // @name:en      Nexus Mods Enhancer
 // @namespace    nexusmods-enhancer
-// @version      1.5.3
+// @version      1.5.5
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -31,7 +31,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.3';
+    const VERSION = '1.5.5';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -1912,8 +1912,15 @@
                     if (typeof onProgress === 'function') onProgress({ loaded: event.loaded, total: event.total });
                 },
                 onload: function (response) {
-                    if (response.status >= 200 && response.status < 300) resolve(response.response);
-                    else reject(new Error('HTTP ' + response.status));
+                    if (response.status >= 200 && response.status < 300) {
+                        resolve({
+                            blob: response.response,
+                            headers: response.responseHeaders || '',
+                            finalUrl: response.finalUrl || ''
+                        });
+                    } else {
+                        reject(new Error('HTTP ' + response.status));
+                    }
                 },
                 onerror: function () { reject(new Error('网络错误')); },
                 ontimeout: function () { reject(new Error('下载超时')); }
@@ -1967,19 +1974,21 @@
                 await dlRemoveEntry(dirHandle, finalName);
                 throw fetchError;
             }
-            let blob = null;
+            let fetched = null;
             try {
-                blob = await dlFetchBlobViaGm(url, onProgress);
+                fetched = await dlFetchBlobViaGm(url, onProgress);
             } catch (gmError) {
                 await dlRemoveEntry(dirHandle, finalName);
                 throw gmError;
             }
-            if (!blob || !blob.size) {
+            if (!fetched || !fetched.blob || !fetched.blob.size) {
                 await dlRemoveEntry(dirHandle, finalName);
                 throw new Error('下载内容为空（0 字节）');
             }
-            loadedBytes = blob.size;
-            await dlWriteBuffer(dirHandle, finalName, blob);
+            // 兜底通道同样定名：GM_xhr 的 finalUrl 就是重定向后的 CDN 直链
+            finalName = dlPickFileNameFromParts(fetched.headers, fetched.finalUrl, fileNameHint);
+            loadedBytes = fetched.blob.size;
+            await dlWriteBuffer(dirHandle, finalName, fetched.blob);
         }
         if (!loadedBytes) {
             await dlRemoveEntry(dirHandle, finalName);
@@ -1997,14 +2006,27 @@
      * 优先级：Content-Disposition → 重定向后的最终 URL 末段 → 调用方提示名。
      */
     function dlResolveFinalFileName(response, hint) {
-        const candidates = [];
-        try {
-            const disposition = response.headers.get('content-disposition') || '';
-            const match = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(disposition);
-            if (match) candidates.push(decodeURIComponent(match[1] || match[2] || ''));
-        } catch (ignored) { /* 头读不到就跳过 */ }
-        try { candidates.push(fileNameFromUrl(response.url)); } catch (ignored) { /* 同上 */ }
-        candidates.push(String(hint || ''));
+        let disposition = '';
+        let finalUrl = '';
+        try { disposition = response.headers.get('content-disposition') || ''; } catch (ignored) { /* 头读不到就跳过 */ }
+        try { finalUrl = response.url || ''; } catch (ignored) { /* 同上 */ }
+        return dlPickFileNameFromParts(disposition, finalUrl, hint);
+    }
+
+    /** 从 Content-Disposition 文本里取文件名 */
+    function dlDispositionFileName(disposition) {
+        const match = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(String(disposition || ''));
+        if (!match) return '';
+        const raw = match[1] || match[2] || '';
+        try { return decodeURIComponent(raw); } catch (e) { return raw; }
+    }
+
+    /**
+     * 从「响应头文本 + 最终 URL + 提示名」里定名。
+     * GM_xmlhttpRequest 兜底通道拿不到 Response 对象，只能把它的 responseHeaders 与 finalUrl 传进来。
+     */
+    function dlPickFileNameFromParts(disposition, finalUrl, hint) {
+        const candidates = [dlDispositionFileName(disposition), fileNameFromUrl(finalUrl), String(hint || '')];
         for (let i = 0; i < candidates.length; i++) {
             const raw = String(candidates[i] || '').trim();
             if (!raw) continue;
@@ -2070,11 +2092,14 @@
      */
     async function archivePutFile(folder, fileName, url, options) {
         const opts = options || {};
+        // 两个通道都先探一次真名：Nexus 的下载地址是 302 接口，直链末段没有真名，
+        // 只有跟随重定向后才出现（形如 <标题>-<modId>-<fileId>-<版本>-<时间戳>.zip）。
+        // 写盘函数拿到响应后还会再确认一次，这里探测只是让落盘名从一开始就正确。
+        const probedName = await dlProbeFileName(url, fileName);
         if (opts.rootHandle) {
-            const finalName = await dlSaveToRoot(opts.rootHandle, folder, fileName, url, opts.onProgress);
+            const finalName = await dlSaveToRoot(opts.rootHandle, folder, probedName, url, opts.onProgress);
             return { channel: 'fs', fileName: finalName };
         }
-        const probedName = await dlProbeFileName(url, fileName);
         await gmDownloadTo(url, folder + '/' + probedName, {
             mode: 'start',
             onLateError: opts.onLateError
@@ -2149,8 +2174,33 @@
         if (fromApi && DL_FILE_EXT.test(fromApi)) return fromApi;
         if (declared && DL_FILE_EXT.test(declared)) return declared;
         if (fromUrl && DL_FILE_EXT.test(fromUrl)) return fromUrl;
-        const version = file && file.version ? '-' + file.version : '';
-        return sanitizeFolderName(modTitle, 'mod') + version + '.zip';
+        // 兜底用 Nexus 的文件标题，不要用 mod 标题：
+        // 同一 mod 下的多个文件用 mod 标题会撞名，且和站点上的实际文件名对不上。
+        // 扩展名从直链末段借，借不到按 .zip 处理（Nexus 绝大多数 mod 文件是 zip）。
+        const urlExt = (fromUrl.match(/\.([a-z0-9]{1,8})$/i) || [])[1];
+        const base = sanitizeFolderName(declared || modTitle, 'file');
+        return base + '.' + (urlExt || 'zip');
+    }
+
+    /**
+     * 从当前页面 DOM 取真实文件名。
+     *
+     * Nexus 文件页把直链放在 data-download-url 上，末段就是站点自己的文件名
+     * （<标题>-<modId>-<fileId>-<版本>-<时间戳>.zip）。
+     * 这是唯一既不用拼装、也不用等重定向就能拿到的真名来源，优先用它。
+     */
+    function pickRealFileNameFromDom(fileId) {
+        const nodes = document.querySelectorAll('[data-download-url]');
+        let firstMatch = '';
+        for (let i = 0; i < nodes.length; i++) {
+            const url = decodeDlUrl(nodes[i].getAttribute('data-download-url') || '');
+            const name = fileNameFromUrl(url);
+            if (!name || !DL_FILE_EXT.test(name)) continue;
+            if (!firstMatch) firstMatch = name;
+            // 同一页可能有多个文件：按 fileId 命中，避免拿到别的文件的真名
+            if (fileId && url.indexOf(String(fileId)) >= 0) return name;
+        }
+        return firstMatch;
     }
 
     /**
@@ -2271,12 +2321,14 @@
 
         const resolved = await resolveWithRetry(opts.domain, opts.modId, opts.fileId, opts.gameId);
         const url = resolved.url;
+        // 页面 DOM 里的直链末段就是站点自己的文件名，比任何接口字段与拼装都准
+        const domFileName = pickRealFileNameFromDom(opts.fileId);
         const fileName = sanitizeFileName(
             pickDownloadFileName(
                 { name: opts.fileName, version: opts.version },
                 url,
                 modTitle,
-                resolved.filename
+                domFileName || resolved.filename
             ),
             'file.zip'
         );
