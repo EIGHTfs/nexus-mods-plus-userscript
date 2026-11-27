@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强（下载增强版）
 // @name:en      Nexus Mods Enhancer (Download Enhanced)
 // @namespace    nexusmods-enhancer-e8
-// @version      1.6.5
+// @version      1.6.6
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，压缩包与预览图归档进同一目录，图片也可单独下，支持断点续传；脚本设置面板集中管理下载/界面/AI，文件页下载面板标出已下载的 mod），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable, with a unified settings panel and downloaded-file markers), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -37,7 +37,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.6.5';
+    const VERSION = '1.6.6';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -2257,25 +2257,163 @@
      * 在根目录下按 folderPath 逐级建目录并写入一个文件。
      * getDirectoryHandle 只接受单级名字，所以 <游戏名>/<Mod名> 必须自己逐段拆开建。
      */
+    // ---------- 目标目录断点续传 ----------
+    //
+    // 早先的续传把下载先落 OPFS（要 Worker + createSyncAccessHandle 才能实时落盘），
+    // 那条链依赖页面允许 blob Worker 等外部条件，实测在目标页面一直不可用、
+    // 每次都被迫降级，等于续传从没生效过。
+    //
+    // 现在改为直接对目标目录里的文件续写，只用已授权成功的 File System Access：
+    //   · 文件名与已写偏移记在 GM 存储里，刷新页面也还在
+    //   · FileSystemWritableFileStream 是「close 才落到目标文件」，所以按段 close，
+    //     段内数据才真正进磁盘；中断最多丢最后一段，下次从上次 close 的偏移继续
+    //   · 断点记录只在 close 成功后更新，保证记录不超过磁盘实际大小
+
+    const DL_SEGMENT_BYTES = 4 * 1024 * 1024;   // 每写满 4MB 落一次盘
+
+    /** 打开可续写的 writable：offset>0 时保留已有内容并定位到末尾 */
+    async function dlOpenWritable(dirHandle, fileName, offset) {
+        const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+        const writable = await fileHandle.createWritable({ keepExistingData: offset > 0 });
+        if (offset > 0) await writable.seek(offset);
+        return writable;
+    }
+
+    /**
+     * 从目标目录续写下载。返回 { fileName, totalBytes }。
+     * 不依赖 OPFS/Worker，只要目录授权可用就能续。
+     */
+    async function dlDownloadToDirResumable(dirHandle, fileNameHint, url, resumeKey, onProgress, log) {
+        const say = typeof log === 'function' ? log : function () {};
+        const record = resumeKey ? dlResumeLoad(resumeKey) : null;
+
+        // 1) 上次下到哪：记录里有文件名且目录里确实存在，才算可续
+        let fileName = (record && record.fileName) || '';
+        let offset = 0;
+        if (fileName) {
+            try {
+                const existing = await dirHandle.getFileHandle(fileName);
+                const file = await existing.getFile();
+                offset = Number(file.size) || 0;
+            } catch (e) {
+                fileName = '';
+                offset = 0;
+            }
+        }
+
+        // 2) 发请求：有断点就带 Range；挂可中止信号，切后台能主动掐断
+        dlVisibilityController = new AbortController();
+        const headers = {};
+        if (offset > 0) headers['Range'] = 'bytes=' + offset + '-';
+        const response = await dlFetchForDownload(url, {
+            headers: headers,
+            signal: dlVisibilityController.signal
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+
+        let total = 0;
+        if (response.status === 206) {
+            const contentRange = response.headers.get('content-range') || '';
+            total = dlTotalFromContentRange(contentRange);
+            if (!total) {
+                const segmentLength = Number(response.headers.get('content-length') || 0);
+                if (segmentLength) total = offset + segmentLength;
+            }
+            const serverStart = dlStartFromContentRange(contentRange);
+            if (serverStart >= 0 && serverStart !== offset) {
+                say('服务器续传起点与本地不一致，重新下载', 'warn');
+                offset = 0;
+            }
+            const etag = response.headers.get('etag') || '';
+            if (record && record.etag && etag && etag !== record.etag) {
+                say('文件已更新，旧断点作废，重新下载', 'warn');
+                offset = 0;
+            }
+        } else {
+            if (offset > 0) say('服务器未按断点返回，改为从头下载', 'warn');
+            offset = 0;
+            total = Number(response.headers.get('content-length') || 0);
+        }
+
+        if (!fileName) fileName = dlResolveFinalFileName(response, fileNameHint);
+        // 从头下载且目录里已有同名文件时换名，别盖掉已有文件
+        if (offset === 0) fileName = await dlUniquifyName(dirHandle, fileName);
+        if (offset > 0) say('从断点 ' + fmtSize(offset) + ' 继续下载', 'ok');
+
+        // 3) 分段写入，每段落盘一次
+        let written = offset;
+        let sinceClose = 0;
+        let writable = await dlOpenWritable(dirHandle, fileName, offset);
+        try {
+            if (!response.body || typeof response.body.getReader !== 'function') {
+                const buffer = await response.arrayBuffer();
+                if (buffer.byteLength) {
+                    await writable.write(buffer);
+                    written += buffer.byteLength;
+                }
+                await writable.close();
+            } else {
+                const reader = response.body.getReader();
+                for (;;) {
+                    const chunk = await reader.read();
+                    if (chunk.done) break;
+                    const value = chunk.value;
+                    if (!value || !value.byteLength) continue;
+                    await writable.write(value);
+                    written += value.byteLength;
+                    sinceClose += value.byteLength;
+                    if (typeof onProgress === 'function') onProgress({ loaded: written, total: total });
+                    if (sinceClose >= DL_SEGMENT_BYTES) {
+                        await writable.close();
+                        if (resumeKey) dlResumeSave(resumeKey, { fileName: fileName, offset: written, total: total });
+                        writable = await dlOpenWritable(dirHandle, fileName, written);
+                        sinceClose = 0;
+                    }
+                }
+                await writable.close();
+            }
+        } catch (streamError) {
+            try { await writable.close(); } catch (ignored) { /* 已失效就忽略 */ }
+            if (resumeKey && written > offset) {
+                dlResumeSave(resumeKey, { fileName: fileName, offset: written, total: total });
+            }
+            throw streamError;
+        }
+
+        if (!written) {
+            await dlRemoveEntry(dirHandle, fileName);
+            throw new Error('下载内容为空（0 字节）');
+        }
+        if (total && written !== total) {
+            if (resumeKey) dlResumeSave(resumeKey, { fileName: fileName, offset: written, total: total });
+            throw new Error('下载不完整（' + fmtSize(written) + ' / ' + fmtSize(total) + '），可重试续传');
+        }
+        if (resumeKey) dlResumeClear(resumeKey);
+        return { fileName: fileName, totalBytes: written };
+    }
+
     async function dlSaveToRoot(rootHandle, folderPath, fileName, url, onProgress, resumeKey, log) {
         const segments = String(folderPath || '').split('/').filter(Boolean);
         let dirHandle = rootHandle;
         for (let i = 0; i < segments.length; i++) {
             dirHandle = await dirHandle.getDirectoryHandle(segments[i], { create: true });
         }
-        // 慢速网络优先走 OPFS 断点续传：中断后能从已下载位置接上，而不是从头再来
+        // 慢速网络走断点续传：中断后从已下载位置接上，而不是从头再来。
+        // 用目标目录续写（不依赖 OPFS/Worker），实测那条路在目标页面一直降级。
         if (resumeKey) {
-            const got = await dlDownloadViaOpfs(url, fileName, resumeKey, onProgress, log);
-            if (got) {
-                const finalName = await dlCommitOpfsToDir(dirHandle, got.partName, got.fileName);
-                dlResumeClear(resumeKey);
-                return finalName;
-            }
+            const resumed = await dlDownloadToDirResumable(
+                dirHandle, fileName, url, resumeKey, onProgress, log
+            );
+            return resumed.fileName;
         }
         return await dlWriteUrlToFile(dirHandle, fileName, url, onProgress);
     }
 
-    // ---------- OPFS 断点续传（1.6.0）----------
+    // ---------- OPFS 断点续传（已弃用）----------
+    //
+    // 【已弃用】下载已改为「目标目录续写」（dlDownloadToDirResumable）：
+    // 那条路只依赖已授权的 File System Access，不再需要 Worker 与 OPFS。
+    // 保留本段仅为回退参考，当前没有任何调用点，将来可整段删除。
     //
     // 为什么单独做一套：
     //   站点限速时单个 mod 可能要下几十分钟，任何一次网络抖动都会让「直接写目标目录」从头重来。
@@ -3187,6 +3325,10 @@
             '  <label class="nme-dl-opt"><input id="nme-dl-folder" type="checkbox"> 按 mod 建文件夹</label>',
             '  <button id="nme-dl-images-btn" class="nme-dl-btn" type="button">下载图片</button>',
             '  <button id="nme-dl-root-btn" class="nme-dl-btn" type="button">选择保存目录</button>',
+            '  <div id="nme-dl-total" class="nme-dl-total" hidden>',
+            '    <div class="nme-dl-total-track"><div class="nme-dl-total-bar"></div></div>',
+            '    <div id="nme-dl-total-text" class="nme-dl-total-text"></div>',
+            '  </div>',
             '  <span id="nme-dl-status" class="nme-ai-status"></span>',
             '</div>',
             '<div id="nme-dl-list" class="nme-dl-list"><div class="nme-dl-empty">正在读取文件列表…</div></div>'
@@ -3236,6 +3378,66 @@
 
     const DL_PROGRESS_BAR_WIDTH = 10;   // 文本进度条的格数
 
+    // 进行中的下载：fileId → { loaded, total }。用于汇总成一条总进度，
+    // 而不是让多个下载抢状态行那一个位置。
+    const dlActiveDownloads = new Map();
+
+    /** 按百分比取颜色：0% 红 → 50% 橙黄 → 100% 绿 */
+    function progressHue(percent) {
+        const ratio = Math.max(0, Math.min(100, Number(percent) || 0)) / 100;
+        const hue = Math.round(ratio * 120);            // 0° 红 → 120° 绿
+        return 'hsl(' + hue + ', 78%, 52%)';
+    }
+
+    /** 单文件进度条着色（渐变，按百分比变色） */
+    function paintProgressBar(bar, percent) {
+        if (!bar) return;
+        const color = progressHue(percent);
+        bar.style.width = Math.max(0, Math.min(100, percent)) + '%';
+        bar.style.background = 'linear-gradient(90deg, ' +
+            progressHue(Math.max(0, percent - 18)) + ', ' + color + ')';
+    }
+
+    /** 刷新面板顶部的总进度条；没有进行中的下载就收起 */
+    function refreshTotalProgress() {
+        const wrap = document.getElementById('nme-dl-total');
+        if (!wrap) return;
+        let loaded = 0;
+        let total = 0;
+        let active = 0;
+        dlActiveDownloads.forEach(function (item) {
+            active++;
+            loaded += Number(item.loaded) || 0;
+            total += Number(item.total) || 0;
+        });
+        if (!active) {
+            wrap.hidden = true;
+            return;
+        }
+        wrap.hidden = false;
+        const percent = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
+        paintProgressBar(wrap.querySelector('.nme-dl-total-bar'), percent);
+        const text = document.getElementById('nme-dl-total-text');
+        if (text) {
+            text.textContent = '总进度 ' + active + ' 个文件 · ' +
+                (total ? percent + '% · ' + fmtSize(loaded) + ' / ' + fmtSize(total) : fmtSize(loaded));
+        }
+    }
+
+    /** 登记/更新某个下载的进度，并刷新总进度条 */
+    function trackDownloadProgress(fileId, loaded, total) {
+        if (fileId == null) return;
+        dlActiveDownloads.set(String(fileId), { loaded: loaded, total: total });
+        refreshTotalProgress();
+    }
+
+    /** 下载结束（成功或失败）后移除，避免总进度一直挂着 */
+    function untrackDownloadProgress(fileId) {
+        if (fileId == null) return;
+        dlActiveDownloads.delete(String(fileId));
+        refreshTotalProgress();
+    }
+
     /** 文本进度条：[██████░░░░] */
     function fmtProgressBar(loaded, total, width) {
         const cells = width || DL_PROGRESS_BAR_WIDTH;
@@ -3275,7 +3477,7 @@
                 const loaded = Number(p && p.loaded) || 0;
                 const total = Number(p && p.total) || 0;
                 const percent = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
-                bar.style.width = percent + '%';
+                paintProgressBar(bar, percent);   // 颜色随百分比渐变：红 → 橙 → 绿
                 text.textContent = fmtSize(loaded) +
                     (total ? ' / ' + fmtSize(total) + ' · ' + percent + '%' : '');
             },
@@ -3474,6 +3676,7 @@
                 dlStatus('正在下载到 ' + target + '/ …', 'busy');
                 if (rowUi) rowUi.start();
                 btn.textContent = '下载中…';
+                trackDownloadProgress(file.fileId, 0, 0);
                 const result = await archiveDownload({
                     domain: ctx.domain,
                     modId: ctx.modId,
@@ -3487,10 +3690,14 @@
                     ctxMode: 'detail',
                     rootHandle: root.handle,
                     rootReason: root.reason,
-                    onProgress: rowUi ? function (p) { rowUi.update(p); } : null,
+                    onProgress: function (p) {
+                        if (rowUi) rowUi.update(p);
+                        trackDownloadProgress(file.fileId, p.loaded, p.total);
+                    },
                     log: function (text, kind) { dlStatus(text, kind); }
                 });
                 if (rowUi) rowUi.finish();
+                untrackDownloadProgress(file.fileId);
                 markDl(file.fileId);
                 markPanelRowDownloaded(btn);
                 dlStatus('已加入下载：' + result.folder + '/' + result.file +
@@ -3505,6 +3712,7 @@
             dlStatus('已开始下载：' + (file.name || file.fileId), 'ok');
         } catch (e) {
             if (rowUi) rowUi.finish();
+            untrackDownloadProgress(file.fileId);
             dlStatus((e && e.message) || String(e), 'err');
         } finally {
             btn.disabled = false;
@@ -5012,10 +5220,18 @@
             '#nme-dl-bar .nme-dl-tag{display:inline-block;font-size:.6875rem;border:1px solid currentColor;',
             '  border-radius:.2rem;padding:0 .25rem;margin-left:.35rem;opacity:.8;vertical-align:middle;}',
             // 「已下载」徽章：实心绿底，和描边的分类标签区分开，一眼能看出下没下过
+            // 总进度条：汇总所有进行中的下载，避免多个下载抢状态行那一个位置
+            '#nme-dl-bar .nme-dl-total{margin:.55rem 0 .15rem;}',
+            '#nme-dl-bar .nme-dl-total-track{height:.375rem;background:rgba(255,255,255,.1);',
+            '  border-radius:.1875rem;overflow:hidden;}',
+            '#nme-dl-bar .nme-dl-total-bar{height:100%;width:0;border-radius:.1875rem;',
+            '  transition:width .25s ease,background .25s ease;}',
+            '#nme-dl-bar .nme-dl-total-text{font-size:.6875rem;opacity:.72;margin-top:.22rem;}',
             // 行内进度条：每个文件行一条，并发下载各走各的不互相覆盖
             '#nme-dl-bar .nme-dl-prog-wrap{margin-top:.45rem;}',
             '#nme-dl-bar .nme-dl-prog{height:.25rem;background:rgba(255,255,255,.12);border-radius:.125rem;overflow:hidden;}',
-            '#nme-dl-bar .nme-dl-prog-bar{height:100%;width:0;background:#d34a4a;transition:width .25s ease;}',
+            '#nme-dl-bar .nme-dl-prog-bar{height:100%;width:0;border-radius:.125rem;',
+            '  background:linear-gradient(90deg,#e05252,#e0a33c);transition:width .25s ease,background .25s ease;}',
             '#nme-dl-bar .nme-dl-prog-text{font-size:.6875rem;opacity:.7;margin-top:.2rem;}',
             '#nme-dl-bar .nme-dl-done{display:inline-block;font-size:.6875rem;border-radius:.2rem;',
             '  padding:0 .3rem;margin-left:.35rem;vertical-align:middle;background:rgba(105,192,138,.18);',
