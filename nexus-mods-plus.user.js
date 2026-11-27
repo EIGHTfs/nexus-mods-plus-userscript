@@ -3332,30 +3332,65 @@
 
     // ---------- 模组详情页：文件列表 + 一键下载 ----------
 
+    // 两个页面共用的面板控件：详情页与合集页都要这套，抽常量避免两处各写一遍
+    const DL_FOLDER_TOGGLE_HTML =
+        '<label class="nme-dl-opt"><input id="nme-dl-folder" type="checkbox"> 按 mod 建文件夹</label>';
+    const DL_ROOT_BUTTON_HTML =
+        '<button id="nme-dl-root-btn" class="nme-dl-btn" type="button">选择保存目录</button>';
+
+    /**
+     * 下载面板外壳：统一 title / 副标题 / 按钮区 / 状态行 的拼装。
+     * 详情页与合集页只有「按钮清单、内容区、标题」不同，结构与容器都一致，
+     * 抽出来避免两处各维护一套相同骨架（改样式或加通用控件时会漏改其中一边）。
+     *
+     * opts: { title, subtitle, subtitleId, actions: [], withTotal, body: [] }
+     */
+    function buildDownloadPanel(opts) {
+        const lines = [
+            '<div class="nme-dl-head">',
+            '  <span class="nme-dl-title">' + opts.title + '</span>',
+            opts.subtitleId
+                ? '  <span id="' + opts.subtitleId + '" class="nme-dl-sub">' + opts.subtitle + '</span>'
+                : '  <span class="nme-dl-sub">' + opts.subtitle + '</span>',
+            '</div>',
+            '<div class="nme-dl-actions">'
+        ];
+        (opts.actions || []).forEach(function (actionHtml) { lines.push('  ' + actionHtml); });
+        if (opts.withTotal) {
+            lines.push(
+                '  <div id="nme-dl-total" class="nme-dl-total" hidden>',
+                '    <div class="nme-dl-total-track"><div class="nme-dl-total-bar"></div></div>',
+                '    <div id="nme-dl-total-text" class="nme-dl-total-text"></div>',
+                '  </div>'
+            );
+        }
+        lines.push('  <span id="nme-dl-status" class="nme-ai-status"></span>');
+        lines.push('</div>');
+        (opts.body || []).forEach(function (bodyHtml) { lines.push(bodyHtml); });
+        const bar = el('div', { id: 'nme-dl-bar' });
+        bar.innerHTML = lines.join('');
+        return bar;
+    }
+
     function mountDetailDownload(ctx) {
         if (!ctx || ctx.mode !== 'detail' || $('#nme-dl-bar')) return;
         const sec = fabSection(FAB_SEC_DL);
         if (!sec) return;
 
-        const bar = el('div', { id: 'nme-dl-bar' });
-        bar.innerHTML = [
-            '<div class="nme-dl-head">',
-            '  <span class="nme-dl-title">N网 下载</span>',
-            '  <span class="nme-dl-sub">官方接口直链 · 个人文件下载</span>',
-            '</div>',
-            '<div class="nme-dl-actions">',
-            '  <button id="nme-dl-refresh" class="nme-dl-btn" type="button">刷新文件列表</button>',
-            '  <label class="nme-dl-opt"><input id="nme-dl-folder" type="checkbox"> 按 mod 建文件夹</label>',
-            '  <button id="nme-dl-images-btn" class="nme-dl-btn" type="button">下载图片</button>',
-            '  <button id="nme-dl-root-btn" class="nme-dl-btn" type="button">选择保存目录</button>',
-            '  <div id="nme-dl-total" class="nme-dl-total" hidden>',
-            '    <div class="nme-dl-total-track"><div class="nme-dl-total-bar"></div></div>',
-            '    <div id="nme-dl-total-text" class="nme-dl-total-text"></div>',
-            '  </div>',
-            '  <span id="nme-dl-status" class="nme-ai-status"></span>',
-            '</div>',
-            '<div id="nme-dl-list" class="nme-dl-list"><div class="nme-dl-empty">正在读取文件列表…</div></div>'
-        ].join('');
+        const bar = buildDownloadPanel({
+            title: 'N网 下载',
+            subtitle: '官方接口直链 · 个人文件下载',
+            actions: [
+                '<button id="nme-dl-refresh" class="nme-dl-btn" type="button">刷新文件列表</button>',
+                DL_FOLDER_TOGGLE_HTML,
+                '<button id="nme-dl-images-btn" class="nme-dl-btn" type="button">下载图片</button>',
+                DL_ROOT_BUTTON_HTML
+            ],
+            withTotal: true,
+            body: [
+                '<div id="nme-dl-list" class="nme-dl-list"><div class="nme-dl-empty">正在读取文件列表…</div></div>'
+            ]
+        });
 
         sec.appendChild(bar);
 
@@ -3785,25 +3820,24 @@
         const sec = fabSection(FAB_SEC_DL);
         if (!sec) return;
 
-        const bar = el('div', { id: 'nme-dl-bar' });
-        bar.innerHTML = [
-            '<div class="nme-dl-head">',
-            '  <span class="nme-dl-title">N网 合集下载</span>',
-            '  <span id="nme-dl-sub" class="nme-dl-sub">正在读取合集…</span>',
-            '</div>',
-            '<div class="nme-dl-actions">',
-            '  <label class="nme-dl-meta">间隔 <input id="nme-dl-gap" class="nme-dl-gap" type="number" min="1" max="60" step="1"></label>',
-            '  <label class="nme-dl-opt"><input id="nme-dl-folder" type="checkbox"> 按 mod 建文件夹</label>',
-            '  <button id="nme-dl-root-btn" class="nme-dl-btn" type="button">选择保存目录</button>',
-            '  <button id="nme-dl-start" class="nme-dl-btn nme-dl-btn-accent" type="button" disabled>开始下载</button>',
-            '  <button id="nme-dl-pause" class="nme-dl-btn" type="button" disabled>暂停</button>',
-            '  <button id="nme-dl-stop" class="nme-dl-btn" type="button" disabled>停止</button>',
-            '  <button id="nme-dl-clear" class="nme-dl-btn" type="button">清空历史</button>',
-            '  <span id="nme-dl-status" class="nme-ai-status"></span>',
-            '</div>',
-            '<div class="nme-dl-prog"><div id="nme-dl-prog-fill" class="nme-dl-prog-fill"></div></div>',
-            '<div id="nme-dl-log" class="nme-dl-log"></div>'
-        ].join('');
+        const bar = buildDownloadPanel({
+            title: 'N网 合集下载',
+            subtitle: '正在读取合集…',
+            subtitleId: 'nme-dl-sub',
+            actions: [
+                '<label class="nme-dl-meta">间隔 <input id="nme-dl-gap" class="nme-dl-gap" type="number" min="1" max="60" step="1"></label>',
+                DL_FOLDER_TOGGLE_HTML,
+                DL_ROOT_BUTTON_HTML,
+                '<button id="nme-dl-start" class="nme-dl-btn nme-dl-btn-accent" type="button" disabled>开始下载</button>',
+                '<button id="nme-dl-pause" class="nme-dl-btn" type="button" disabled>暂停</button>',
+                '<button id="nme-dl-stop" class="nme-dl-btn" type="button" disabled>停止</button>',
+                '<button id="nme-dl-clear" class="nme-dl-btn" type="button">清空历史</button>'
+            ],
+            body: [
+                '<div class="nme-dl-prog"><div id="nme-dl-prog-fill" class="nme-dl-prog-fill"></div></div>',
+                '<div id="nme-dl-log" class="nme-dl-log"></div>'
+            ]
+        });
         sec.appendChild(bar);
 
         const gapEl = bar.querySelector('#nme-dl-gap');
