@@ -2,8 +2,8 @@
 // @name         Nexus Mods 增强
 // @name:en      Nexus Mods Enhancer
 // @namespace    nexusmods-enhancer
-// @version      1.6.2
-// @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下，支持断点续传；脚本设置面板集中管理下载/界面/AI，文件页下载面板标出已下载的 mod），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
+// @version      1.6.3
+// @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，压缩包与预览图归档进同一目录，图片也可单独下，支持断点续传；脚本设置面板集中管理下载/界面/AI，文件页下载面板标出已下载的 mod），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable, with a unified settings panel and downloaded-file markers), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
 // @author       SmallRob
@@ -31,7 +31,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.6.2';
+    const VERSION = '1.6.3';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -56,7 +56,7 @@
         skipWait: true,    // 下载等待页自动跳过
         dlGap: 5,          // 合集批量下载间隔（秒）
         dlFolder: true,    // 按 mod 名建文件夹归档（GM_download 子目录）
-        // 图片默认不跟着安装包一起下：图库动辄十几张，每次下 mod 都顺带请求一遍
+        // 图片默认不跟着压缩包一起下：图库动辄十几张，每次下 mod 都顺带请求一遍
         // 既费流量也拖慢下载队列。改为面板上独立的「下载图片」按钮按需触发。
         dlImagesWithMod: false,
         dlImgLimit: 12     // 单个 mod 最多下载几张图片（0 = 不限）
@@ -1470,7 +1470,7 @@
             '  </div>',
             '  <div class="nme-ai-modal-help">选一次目录后，下载会自动在该目录下建 <code>游戏名/Mod 名/</code>；不选则退回浏览器下载目录，那条通道是否建文件夹取决于脚本管理器。</div>',
             '  <label class="nme-cfg-check"><input id="nme-cfg-folder" type="checkbox"> 按 mod 建文件夹</label>',
-            '  <label class="nme-cfg-check"><input id="nme-cfg-imgwith" type="checkbox"> 下载安装包时附带图片</label>',
+            '  <label class="nme-cfg-check"><input id="nme-cfg-imgwith" type="checkbox"> 下载压缩包时附带图片</label>',
             '  <div class="nme-cfg-row">',
             '    <span class="nme-cfg-label">每个 mod 最多图片数</span>',
             '    <input id="nme-cfg-imglimit" class="nme-cfg-num" type="number" min="0" max="50" step="1">',
@@ -1831,7 +1831,7 @@
 
     // ---------- 按 mod 归档下载（1.4.0 新增）----------
     //
-    // 目标：一次下载 = 一个 <Mod名>/ 文件夹，里面放该 mod 的安装包与预览图。
+    // 目标：一次下载 = 一个 <Mod名>/ 文件夹，里面放该 mod 的压缩包与预览图。
     //
     // 为什么不能沿用上面的 triggerDownload：
     //   a[download] 的 download 属性只是「建议文件名」，不含路径。Chrome 会把其中的 / 换成 _，
@@ -2056,6 +2056,8 @@
     async function dlWriteUrlToFile(dirHandle, fileNameHint, url, onProgress) {
         let loadedBytes = 0;
         let finalName = sanitizeFileName(fileNameHint, 'file.zip');
+        // 已落盘的文件名：任何失败都要按它清掉，否则会留下 0 字节空壳
+        let createdName = '';
         try {
             const response = await dlFetchForDownload(url);
             if (!response.ok) throw new Error('HTTP ' + response.status);
@@ -2068,6 +2070,7 @@
                 await dlWriteBuffer(dirHandle, fileName, buffer);
             } else {
                 const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+                createdName = fileName;
                 const writable = await fileHandle.createWritable();
                 const total = Number(response.headers.get('content-length') || 0);
                 const reader = response.body.getReader();
@@ -2086,12 +2089,15 @@
                 }
             }
         } catch (fetchError) {
+            // 先清掉可能已创建的空壳文件再决定后续：
+            // 切后台中止时响应还没到手、名字仍是兜底名，不删就会留下 0 字节压缩包
+            await dlRemoveEntry(dirHandle, createdName || finalName);
+            createdName = '';
             // 切后台主动中止时直接抛出：交给前台的守卫处理，
             // 绝不能落到 GM_xhr 兜底，否则会把整个文件读进内存
             if (dlIsAbortError(fetchError)) throw fetchError;
             // fetch 通道失败（CORS / 403 / 网络）：改用 GM_xhr 取完整 blob 再写
             if (typeof GM_xmlhttpRequest !== 'function') {
-                await dlRemoveEntry(dirHandle, finalName);
                 throw fetchError;
             }
             let fetched = null;
@@ -2633,13 +2639,17 @@
         // 两个通道都先探一次真名：Nexus 的下载地址是 302 接口，直链末段没有真名，
         // 只有跟随重定向后才出现（形如 <标题>-<modId>-<fileId>-<版本>-<时间戳>.zip）。
         // 写盘函数拿到响应后还会再确认一次，这里探测只是让落盘名从一开始就正确。
-        const probedName = await dlProbeFileName(url, fileName);
         if (opts.rootHandle) {
+            // 文件系统通道：不再用 HEAD 预探测文件名。
+            // 预探测与真正下载是两次请求，可能得到不同的名字（一次兜底名、一次真名），
+            // 结果是同一次下载在目录里留下两个文件。这里让名字统一由本次 GET 响应决定。
             const finalName = await dlSaveToRoot(
-                opts.rootHandle, folder, probedName, url, opts.onProgress, opts.resumeKey, opts.log
+                opts.rootHandle, folder, fileName, url, opts.onProgress, opts.resumeKey, opts.log
             );
             return { channel: 'fs', fileName: finalName };
         }
+        // 浏览器下载通道只能 URL 直传、事后无法改名，所以仍需先探测一次
+        const probedName = await dlProbeFileName(url, fileName);
         await gmDownloadTo(url, folder + '/' + probedName, {
             mode: 'start',
             onLateError: opts.onLateError
@@ -2900,7 +2910,7 @@
         else log('⚠ 没走保存目录（' + (dlRootProblemText(opts.rootReason) || '未授权') +
             '），已退回浏览器下载，这条通道不保证建文件夹', 'warn');
 
-        // 图片默认不跟着安装包走（见 DEFAULTS 注释）；独立按钮调用时用 forceImages 显式要求
+        // 图片默认不跟着压缩包走（见 DEFAULTS 注释）；独立按钮调用时用 forceImages 显式要求
         if (!opts.forceImages && !CFG.dlImagesWithMod) return { folder: folder, file: put.fileName, images: 0 };
 
         const images = collectArchiveImages(opts);
@@ -2946,7 +2956,7 @@
 
     /**
      * 下载当前 mod 的全部预览图到 <Mod名>/（独立按钮）。
-     * 与「下载安装包时附带图片」的区别：这条路只下图片，不解析直链、不碰安装包，
+     * 与「下载压缩包时附带图片」的区别：这条路只下图片，不解析直链、不碰压缩包，
      * 目录不存在时 GM_download 会按 name 里的路径自动建出来。
      */
     async function downloadModImages(ctx, btn) {
@@ -3011,7 +3021,7 @@
             folderBox.disabled = !supported;
             if (folderBox.parentElement) {
                 folderBox.parentElement.title = supported
-                    ? '下载时自动创建 <Mod名> 文件夹，安装包与图片都放进去'
+                    ? '下载时自动创建 <Mod名> 文件夹，压缩包与图片都放进去'
                     : '当前脚本管理器没有 GM_download（或脚本未声明 @grant GM_download），无法自动建文件夹';
             }
             folderBox.addEventListener('change', function () {
@@ -3023,7 +3033,7 @@
             imagesBox.checked = !!CFG.dlImagesWithMod;
             imagesBox.disabled = !supported;
             if (imagesBox.parentElement) {
-                imagesBox.parentElement.title = '勾选后，下载安装包时会顺带把预览图下到同一文件夹；' +
+                imagesBox.parentElement.title = '勾选后，下载压缩包时会顺带把预览图下到同一文件夹；' +
                     '不勾则改用旁边的「下载图片」按钮单独触发（默认不勾，避免每次下 mod 都额外请求一堆图）';
             }
             imagesBox.addEventListener('change', function () {
@@ -3234,6 +3244,18 @@
         return !!key && downloaded.byName[key] === true;
     }
 
+    /** 下载成功后立刻在面板该行打「已下载」，不必等页面刷新才有状态 */
+    function markPanelRowDownloaded(btn) {
+        const row = (btn && typeof btn.closest === 'function') ? btn.closest('.nme-dl-row') : null;
+        if (!row) return;
+        const nameEl = row.querySelector('.nme-dl-name');
+        if (!nameEl || nameEl.querySelector('.nme-dl-done')) return;
+        const badge = document.createElement('span');
+        badge.className = 'nme-dl-done';
+        badge.textContent = '已下载';
+        nameEl.appendChild(badge);
+    }
+
     function renderDetailFiles(files) {
         const list = $('#nme-dl-list');
         if (!list) return;
@@ -3272,7 +3294,7 @@
         btn.textContent = '获取中…';
         dlStatus('正在获取「' + (file.name || file.fileId) + '」的下载地址…', 'busy');
         try {
-            // 归档模式：<游戏名>/<Mod名>/，安装包与预览图都进去
+            // 归档模式：<游戏名>/<Mod名>/，压缩包与预览图都进去
             if (CFG.dlFolder && dlHasArchiveChannel()) {
                 // 第一件事就是确认目录授权：用户激活窗口只有几秒，先等网络请求会把它耗掉
                 const root = await dlEnsureRoot();
@@ -3298,6 +3320,7 @@
                     log: function (text, kind) { dlStatus(text, kind); }
                 });
                 markDl(file.fileId);
+                markPanelRowDownloaded(btn);
                 dlStatus('已加入下载：' + result.folder + '/' + result.file +
                     (result.images ? '（另 ' + result.images + ' 张图片）' : ''), 'ok');
                 return;
@@ -3306,6 +3329,7 @@
             const resolved = await resolveWithRetry(ctx.domain, ctx.modId, file.fileId, state.dlGameId);
             triggerDownload(resolved.url, file.name);
             markDl(file.fileId);
+            markPanelRowDownloaded(btn);
             dlStatus('已开始下载：' + (file.name || file.fileId), 'ok');
         } catch (e) {
             dlStatus((e && e.message) || String(e), 'err');
