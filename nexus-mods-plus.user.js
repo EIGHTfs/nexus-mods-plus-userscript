@@ -1,12 +1,12 @@
 // ==UserScript==
-// @name         Nexus Mods 增强
-// @name:en      Nexus Mods Enhancer
-// @namespace    nexusmods-enhancer
+// @name         Nexus Mods 增强（下载增强版）
+// @name:en      Nexus Mods Enhancer (Download Enhanced)
+// @namespace    nexusmods-enhancer-e8
 // @version      1.6.4
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，压缩包与预览图归档进同一目录，图片也可单独下，支持断点续传；脚本设置面板集中管理下载/界面/AI，文件页下载面板标出已下载的 mod），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable, with a unified settings panel and downloaded-file markers), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
-// @author       SmallRob
+// @author       SmallRob, EIGHTfs
 // @match        https://www.nexusmods.com/*
 // @grant        GM_addStyle
 // @grant        GM_getValue
@@ -27,6 +27,12 @@
 // @license      MIT
 // @tag          NexusMods
 // ==/UserScript==
+
+// 基于 SmallRob 的「Nexus Mods 增强」1.3.3（MIT 许可）修改维护。
+// 原脚本：https://scriptcat.org/zh-CN/script-show-page/8917
+// 依据 MIT 许可保留原作者署名；namespace 使用本增强版自身标识，避免与原脚本冲突被当作同一脚本覆盖。
+// 主要改动：按 mod 归档下载（游戏名/Mod 名）、断点续传、已下载标记、脚本设置面板、
+//           图片独立下载、合集批量下载与进度条。
 
 (function () {
     'use strict';
