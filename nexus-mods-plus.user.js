@@ -3633,6 +3633,31 @@
         state.dlViewerDownloaded = (mod.viewerDownloaded === true);
     }
 
+    /**
+     * 生成单个文件行的 HTML（纯函数，无 DOM 依赖，可单测）。
+     * 详情页与合集页的文件行结构一致，抽出来便于复用与测试。
+     */
+    function buildFileRowHtml(file, index, downloaded) {
+        const tag = file.category
+            ? '<span class="nme-dl-tag">' + escapeHtml(file.category) + '</span>'
+            : '';
+        const doneTag = isFileDownloaded(downloaded, file)
+            ? '<span class="nme-dl-done">已下载</span>'
+            : '';
+        const meta = [
+            file.version ? '版本 ' + file.version : '',
+            file.sizeInBytes ? fmtSize(file.sizeInBytes) : '',
+            file.totalDownloads != null ? '下载 ' + fmtNum(file.totalDownloads) : ''
+        ].filter(Boolean).join(' · ');
+        return '<div class="nme-dl-row">' +
+            '<div class="nme-dl-main">' +
+            '<div class="nme-dl-name">' + escapeHtml(file.name || ('文件 #' + file.fileId)) + tag + doneTag + '</div>' +
+            '<div class="nme-dl-meta">' + escapeHtml(meta) + '</div>' +
+            '</div>' +
+            '<button class="nme-dl-btn nme-dl-go" type="button" data-idx="' + index + '">一键下载</button>' +
+            '</div>';
+    }
+
     function renderDetailFiles(files) {
         const list = $('#nme-dl-list');
         if (!list) return;
@@ -3655,20 +3680,7 @@
             ? '<div class="nme-dl-meta">你下载过这个 mod（具体是哪个文件，接口查不到）</div>'
             : '';
         list.innerHTML = modLevelHint + files.map(function (f, i) {
-            const tag = f.category ? '<span class="nme-dl-tag">' + escapeHtml(f.category) + '</span>' : '';
-            const doneTag = isDownloaded(f) ? '<span class="nme-dl-done">已下载</span>' : '';
-            const meta = [
-                f.version ? '版本 ' + f.version : '',
-                f.sizeInBytes ? fmtSize(f.sizeInBytes) : '',
-                f.totalDownloads != null ? '下载 ' + fmtNum(f.totalDownloads) : ''
-            ].filter(Boolean).join(' · ');
-            return '<div class="nme-dl-row">' +
-                '<div class="nme-dl-main">' +
-                '<div class="nme-dl-name">' + escapeHtml(f.name || ('文件 #' + f.fileId)) + tag + doneTag + '</div>' +
-                '<div class="nme-dl-meta">' + escapeHtml(meta) + '</div>' +
-                '</div>' +
-                '<button class="nme-dl-btn nme-dl-go" type="button" data-idx="' + i + '">一键下载</button>' +
-                '</div>';
+            return buildFileRowHtml(f, i, downloaded);
         }).join('');
     }
 
