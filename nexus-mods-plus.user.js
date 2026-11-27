@@ -1478,19 +1478,13 @@
 
     // ==================== AI 配置弹窗 ====================
 
-    /** 兼容旧调用点：AI 功能未配置时仍会弹设置面板，并聚焦 AI 分区 */
-    function openAiSettings() { openSettings('ai'); }
-
     /**
-     * 脚本设置面板（1.6.x）：把原先散在脚本菜单里的配置集中到一处。
-     * 三个分区：下载 / 界面 / AI，保存时分别写 CFG 与 aiCfg。
-     * 分区样式复用原有 .nme-ai-modal 体系，只补了分区标题与勾选行。
+     * 设置面板的 HTML 模板（纯字符串，无逻辑）。
+     * 抽出来让 openSettings 只关心「取值、回填、保存」这类真正有分支的逻辑。
+     * 三个分区：下载 / 界面 / AI。
      */
-    function openSettings(focusSection) {
-        if ($('#nme-ai-cfg-modal')) return;
-        const dlFolder = typeof CFG.dlFolder === 'boolean' ? CFG.dlFolder : true;
-        const modal = el('div', { id: 'nme-ai-cfg-modal' });
-        modal.innerHTML = [
+    function buildSettingsModalHtml() {
+        return [
             '<div class="nme-ai-modal">',
             '  <div class="nme-ai-modal-title">脚本设置</div>',
 
@@ -1533,6 +1527,21 @@
             '  </div>',
             '</div>'
         ].join('');
+    }
+
+    /** 兼容旧调用点：AI 功能未配置时仍会弹设置面板，并聚焦 AI 分区 */
+    function openAiSettings() { openSettings('ai'); }
+
+    /**
+     * 脚本设置面板（1.6.x）：把原先散在脚本菜单里的配置集中到一处。
+     * 三个分区：下载 / 界面 / AI，保存时分别写 CFG 与 aiCfg。
+     * 分区样式复用原有 .nme-ai-modal 体系，只补了分区标题与勾选行。
+     */
+    function openSettings(focusSection) {
+        if ($('#nme-ai-cfg-modal')) return;
+        const dlFolder = typeof CFG.dlFolder === 'boolean' ? CFG.dlFolder : true;
+        const modal = el('div', { id: 'nme-ai-cfg-modal' });
+        modal.innerHTML = buildSettingsModalHtml();
         document.body.appendChild(modal);
 
         const pick = function (id) { return modal.querySelector(id); };
