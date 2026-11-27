@@ -3076,11 +3076,15 @@
         const progress = dlThrottledProgress(function (p) {
             const loaded = Number(p && p.loaded) || 0;
             const total = Number(p && p.total) || 0;
+            // 单文件下载：进度交给行内进度条与总进度条显示，状态行不再重复刷同一串数字
+            if (typeof opts.onProgress === 'function') {
+                opts.onProgress({ loaded: loaded, total: total });
+                return;
+            }
+            // 合集批量：没有行内进度条，进度只能写进日志
             const percent = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
             log('下载中 ' + fmtProgressBar(loaded, total) + ' ' +
                 (total ? percent + '% · ' + fmtSize(loaded) + ' / ' + fmtSize(total) : fmtSize(loaded)), 'busy');
-            // 行内进度条由调用方提供，并发下载各自更新自己那一行
-            if (typeof opts.onProgress === 'function') opts.onProgress({ loaded: loaded, total: total });
         });
         const putOptions = {
             rootHandle: opts.rootHandle,
@@ -3410,7 +3414,8 @@
             loaded += Number(item.loaded) || 0;
             total += Number(item.total) || 0;
         });
-        if (!active) {
+        // 只有一个下载时，文件行内的进度就是全部信息，再显示总进度属重复
+        if (active < 2) {
             wrap.hidden = true;
             return;
         }
