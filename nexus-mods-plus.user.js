@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强
 // @name:en      Nexus Mods Enhancer
 // @namespace    nexusmods-enhancer
-// @version      1.5.6
+// @version      1.5.7
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下，支持断点续传），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -31,7 +31,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.6';
+    const VERSION = '1.5.7';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -1940,7 +1940,7 @@
         let loadedBytes = 0;
         let finalName = sanitizeFileName(fileNameHint, 'file.zip');
         try {
-            const response = await fetch(url, { credentials: 'include' });
+            const response = await dlFetchForDownload(url);
             if (!response.ok) throw new Error('HTTP ' + response.status);
             // 响应到手才知道真实文件名（重定向之后才有 CDN 直链）
             finalName = dlResolveFinalFileName(response, fileNameHint);
@@ -2037,13 +2037,37 @@
     }
 
     /**
+     * 下载文件专用的 fetch。
+     *
+     * 关键：不能带 credentials:'include'。
+     * Nexus 的下载地址会 302 到 CDN，而 CDN 返回 access-control-allow-origin: *，
+     * 按 CORS 规范带凭据的请求不允许通配符源，浏览器直接抛 TypeError: Failed to fetch（实测）。
+     * 用默认的 same-origin：同源请求自动带 cookie，跨域重定向自动降级为无凭据，两种场景都成立。
+     * 若仍被 401/403 拒绝（个别文件确实要凭据），再用 include 重试一次。
+     */
+    async function dlFetchForDownload(url, options) {
+        const opts = options || {};
+        const baseInit = { method: opts.method || 'GET' };
+        if (opts.headers) baseInit.headers = opts.headers;
+        let response = await fetch(url, baseInit);
+        if (response.status === 401 || response.status === 403) {
+            try {
+                response = await fetch(url, Object.assign({}, baseInit, { credentials: 'include' }));
+            } catch (ignored) {
+                // 带凭据被 CORS 拒绝时保留第一次的响应，走原有错误处理
+            }
+        }
+        return response;
+    }
+
+    /**
      * 探测真实文件名。
      * GM_download 是 URL 直传，下载完没法改名，只能先 HEAD 一次拿响应头；
      * 探测失败（405/403/网络）不影响下载，退回提示名。
      */
     async function dlProbeFileName(url, hint) {
         try {
-            const response = await fetch(url, { method: 'HEAD', credentials: 'include' });
+            const response = await dlFetchForDownload(url, { method: 'HEAD' });
             if (response.ok) return dlResolveFinalFileName(response, hint);
         } catch (ignored) { /* 探测失败就用提示名 */ }
         return hint;
@@ -2288,7 +2312,7 @@
             // 3) 发请求：有断点就带 Range
             const headers = {};
             if (offset > 0) headers['Range'] = 'bytes=' + offset + '-';
-            const response = await fetch(url, { credentials: 'include', headers });
+            const response = await dlFetchForDownload(url, { headers: headers });
             if (!response.ok) throw new Error('HTTP ' + response.status);
 
             let finalName = dlResolveFinalFileName(response, fileNameHint);
