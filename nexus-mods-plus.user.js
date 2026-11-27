@@ -2,9 +2,9 @@
 // @name         Nexus Mods 增强
 // @name:en      Nexus Mods Enhancer
 // @namespace    nexusmods-enhancer
-// @version      1.5.5
-// @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
-// @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately), collection batch download with progress/pause/resume, and update highlighting in download history.
+// @version      1.5.6
+// @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下，支持断点续传），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
+// @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
 // @author       SmallRob
 // @match        https://www.nexusmods.com/*
@@ -31,7 +31,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.5.5';
+    const VERSION = '1.5.6';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -2066,13 +2066,339 @@
      * 在根目录下按 folderPath 逐级建目录并写入一个文件。
      * getDirectoryHandle 只接受单级名字，所以 <游戏名>/<Mod名> 必须自己逐段拆开建。
      */
-    async function dlSaveToRoot(rootHandle, folderPath, fileName, url, onProgress) {
+    async function dlSaveToRoot(rootHandle, folderPath, fileName, url, onProgress, resumeKey, log) {
         const segments = String(folderPath || '').split('/').filter(Boolean);
         let dirHandle = rootHandle;
         for (let i = 0; i < segments.length; i++) {
             dirHandle = await dirHandle.getDirectoryHandle(segments[i], { create: true });
         }
+        // 慢速网络优先走 OPFS 断点续传：中断后能从已下载位置接上，而不是从头再来
+        if (resumeKey) {
+            const got = await dlDownloadViaOpfs(url, fileName, resumeKey, onProgress, log);
+            if (got) {
+                const finalName = await dlCommitOpfsToDir(dirHandle, got.partName, got.fileName);
+                dlResumeClear(resumeKey);
+                return finalName;
+            }
+        }
         return await dlWriteUrlToFile(dirHandle, fileName, url, onProgress);
+    }
+
+    // ---------- OPFS 断点续传（1.6.0）----------
+    //
+    // 为什么单独做一套：
+    //   站点限速时单个 mod 可能要下几十分钟，任何一次网络抖动都会让「直接写目标目录」从头重来。
+    //   实测对比（同一浏览器）：
+    //     主线程 createWritable() 写 1MB 但不 close → 目标文件恒为 0，中断即丢；
+    //     Worker 里 OPFS createSyncAccessHandle 写 512KB + flush() 不 close → 已是 512KB，落盘了。
+    //   所以下载先落到 OPFS 的 .part 文件（实时落盘、可续写），下完再流式复制到用户选的目录。
+    //
+    // 两个必须知道的约束：
+    //   · createSyncAccessHandle 只在 Worker 里可用，主线程没有这个方法；
+    //   · 页面 CSP 可能禁止 blob: Worker，创建失败时抛错，调用方据此降级到原直写通道。
+
+    const DL_RESUME_PREFIX = 'nme.resume.';       // 断点记录的存储前缀
+    const DL_OPFS_PART_SUFFIX = '.nme-part';      // OPFS 里的临时文件名后缀
+
+    /**
+     * OPFS 写入 Worker 源码。
+     * 只做三件事：打开/续写/关闭，每次写入后 flush() —— flush 才是「数据真的在磁盘上」的保证。
+     */
+    const DL_OPFS_WORKER_SRC = [
+        'var handle = null;',
+        'var offset = 0;',
+        'self.onmessage = async function (ev) {',
+        '  var msg = ev.data || {};',
+        '  try {',
+        '    if (msg.type === "open") {',
+        '      var root = await navigator.storage.getDirectory();',
+        '      var fh = await root.getFileHandle(msg.name, { create: true });',
+        '      handle = await fh.createSyncAccessHandle();',
+        '      if (msg.truncate) { handle.truncate(0); offset = 0; }',
+        '      else { offset = msg.offset || 0; }',
+        '      self.postMessage({ type: "opened", size: handle.getSize(), offset: offset });',
+        '      return;',
+        '    }',
+        '    if (msg.type === "write") {',
+        '      var bytes = new Uint8Array(msg.chunk);',
+        '      handle.write(bytes, { at: offset });',
+        '      offset += bytes.byteLength;',
+        '      handle.flush();',
+        '      self.postMessage({ type: "written", offset: offset });',
+        '      return;',
+        '    }',
+        '    if (msg.type === "close") {',
+        '      if (handle) { handle.flush(); handle.close(); }',
+        '      handle = null;',
+        '      self.postMessage({ type: "closed", offset: offset });',
+        '    }',
+        '  } catch (err) {',
+        '    self.postMessage({ type: "error", message: (err && err.message) || String(err) });',
+        '  }',
+        '};'
+    ].join('\n');
+
+    /** 建立 OPFS Worker；CSP 禁止或环境不支持时返回 null，由调用方降级 */
+    function dlCreateOpfsWorker() {
+        try {
+            if (typeof Worker !== 'function' || typeof Blob !== 'function') return null;
+            const blob = new Blob([DL_OPFS_WORKER_SRC], { type: 'text/javascript' });
+            const url = URL.createObjectURL(blob);
+            const worker = new Worker(url);
+            return { worker: worker, url: url };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /** 与 Worker 一次性请求-应答（背压也靠它：不等到回执就不继续读下一块） */
+    function dlWorkerRequest(worker, message, transfer) {
+        return new Promise(function (resolve, reject) {
+            let settled = false;
+            const cleanup = function () {
+                worker.removeEventListener('message', onMessage);
+                worker.removeEventListener('error', onError);
+            };
+            const finish = function (err, data) {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                if (err) reject(err); else resolve(data);
+            };
+            const onMessage = function (ev) {
+                const data = ev.data || {};
+                if (data.type === 'error') { finish(new Error(data.message || 'Worker 内部错误')); return; }
+                finish(null, data);
+            };
+            const onError = function (ev) { finish(new Error('Worker 出错：' + ((ev && ev.message) || '未知'))); };
+            worker.addEventListener('message', onMessage);
+            worker.addEventListener('error', onError);
+            try {
+                worker.postMessage(message, transfer || []);
+            } catch (e) {
+                finish(e);
+            }
+        });
+    }
+
+    /**
+     * 关闭 Worker：必须先把 access handle close 掉再 terminate。
+     * 实测（浏览器内）：不 close 直接 terminate 虽然数据仍在，但句柄要几秒后才释放，
+     * 这期间重新打开同一个 .part 会报「another open Access Handle」—— 用户立刻点重试就会卡住。
+     */
+    async function dlCloseOpfsWorker(worker) {
+        try { await dlWorkerRequest(worker, { type: 'close' }); } catch (ignored) { /* handle 可能已失效 */ }
+        try { worker.terminate(); } catch (ignored) { /* 忽略 */ }
+    }
+
+    /** 打开 .part 文件；碰到句柄尚未释放时等待后重试一次 */
+    async function dlOpenPart(worker, partName, offset, truncate, say) {
+        const attempt = function () {
+            return dlWorkerRequest(worker, { type: 'open', name: partName, offset: offset, truncate: truncate });
+        };
+        try {
+            return await attempt();
+        } catch (e) {
+            const text = String((e && e.message) || '');
+            if (/Access Handle|another open/i.test(text)) {
+                if (typeof say === 'function') say('等待上一个下载句柄释放…', 'warn');
+                await sleep(1500);
+                return await attempt();
+            }
+            throw e;
+        }
+    }
+
+    /** 断点记录：{ partName, offset, etag, total } —— 存 GM 存储，刷新页面也不丢 */
+    function dlResumeLoad(key) {
+        try {
+            const raw = GM_getValue(DL_RESUME_PREFIX + key, '');
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) { return null; }
+    }
+
+    function dlResumeSave(key, record) {
+        try { GM_setValue(DL_RESUME_PREFIX + key, JSON.stringify(record)); } catch (e) { /* 存不了不影响下载 */ }
+    }
+
+    function dlResumeClear(key) {
+        try { GM_deleteValue(DL_RESUME_PREFIX + key); } catch (e) { /* 同上 */ }
+    }
+
+    /**
+     * 从 Content-Range 里取总大小：bytes 100-199/1000 → 1000
+     */
+    function dlTotalFromContentRange(headerValue) {
+        const match = /\/\s*(\d+)\s*$/.exec(String(headerValue || ''));
+        return match ? Number(match[1]) : 0;
+    }
+
+    /**
+     * 解析 Content-Range 的起始偏移：bytes 100-199/1000 → 100
+     * 服务器给的起点和我们请求的不一致时，必须以服务器为准，否则会拼错文件。
+     */
+    function dlStartFromContentRange(headerValue) {
+        const match = /bytes\s+(\d+)\s*-/i.exec(String(headerValue || ''));
+        return match ? Number(match[1]) : -1;
+    }
+
+    /**
+     * OPFS 断点续传下载。
+     *
+     * 返回 { fileName, totalBytes }；Worker 不可用 / 环境不支持时返回 null，调用方降级。
+     * resumeKey 用 fileId，保证同一个文件多次尝试能接上，不同文件互不干扰。
+     */
+    async function dlDownloadViaOpfs(url, fileNameHint, resumeKey, onProgress, log) {
+        const say = typeof log === 'function' ? log : function () {};
+        const opfsRoot = await (async function () {
+            try { return await navigator.storage.getDirectory(); } catch (e) { return null; }
+        })();
+        if (!opfsRoot) return null;
+
+        const made = dlCreateOpfsWorker();
+        if (!made) {
+            say('此环境无法创建 Worker（可能被页面 CSP 拦截），改回直接写盘', 'warn');
+            return null;
+        }
+        const worker = made.worker;
+        let partName = '';
+        let started = false;   // 是否已进入写入循环：之前失败可安全降级，之后失败必须保留断点并报错
+        try {
+            // 1) 读断点记录，决定从哪开始
+            const record = dlResumeLoad(resumeKey);
+            partName = (record && record.partName) || ('nme-' + Date.now() + '-' + Math.floor(Math.random() * 1e6) + DL_OPFS_PART_SUFFIX);
+            let wantOffset = (record && record.offset > 0) ? record.offset : 0;
+
+            // 上次已经下完、只是复制到目标目录没成功：不必再请求一次下载，直接交给调用方复制
+            if (record && record.total > 0 && record.offset >= record.total && record.fileName) {
+                say('上次已下载完成，直接写入目标目录', 'ok');
+                return { fileName: record.fileName, totalBytes: record.offset, partName: partName };
+            }
+
+            // 2) 打开 OPFS 文件（wantOffset>0 时保留已有内容准备续写）
+            const opened = await dlOpenPart(worker, partName, wantOffset, wantOffset <= 0, say);
+            // OPFS 里实际大小可能比记录小（记录写过、flush 后崩在别处），以实际为准
+            let offset = Math.min(wantOffset, opened.size || 0);
+            if (offset !== wantOffset) {
+                say('断点记录与实际不符，从 ' + offset + ' 字节继续', 'warn');
+                const reopened = await dlOpenPart(worker, partName, offset, offset <= 0, say);
+                offset = Math.min(offset, reopened.size || 0);
+            }
+
+            // 3) 发请求：有断点就带 Range
+            const headers = {};
+            if (offset > 0) headers['Range'] = 'bytes=' + offset + '-';
+            const response = await fetch(url, { credentials: 'include', headers });
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+
+            let finalName = dlResolveFinalFileName(response, fileNameHint);
+            let total = 0;
+
+            if (response.status === 206) {
+                const contentRange = response.headers.get('content-range') || '';
+                const serverStart = dlStartFromContentRange(contentRange);
+                total = dlTotalFromContentRange(contentRange);
+                if (!total) {
+                    // 实测图片 CDN 未向脚本暴露 content-range（CORS），此时用「已下载 + 本次长度」推算，
+                    // 否则完整性校验会失效
+                    const segmentLength = Number(response.headers.get('content-length') || 0);
+                    if (segmentLength) total = offset + segmentLength;
+                }
+                // 服务器起点与本地不一致：不能硬拼，直接重来
+                if (serverStart >= 0 && serverStart !== offset) {
+                    say('服务器续传起点与本地不一致，重新下载', 'warn');
+                    offset = 0;
+                    await dlOpenPart(worker, partName, 0, true, say);
+                }
+                const etag = response.headers.get('etag') || '';
+                if (record && record.etag && etag && record.etag !== etag) {
+                    say('文件已更新，之前的断点作废，重新下载', 'warn');
+                    offset = 0;
+                    await dlOpenPart(worker, partName, 0, true, say);
+                }
+            } else {
+                // 200：服务器忽略 Range，只能从头写
+                if (offset > 0) say('服务器未按断点返回，改为从头下载', 'warn');
+                offset = 0;
+                await dlWorkerRequest(worker, { type: 'open', name: partName, offset: 0, truncate: true });
+                total = Number(response.headers.get('content-length') || 0);
+            }
+
+            if (offset > 0) say('从断点 ' + fmtSize(offset) + ' 继续下载', 'ok');
+            started = true;
+
+            // 4) 流式写入 OPFS（每块等到 Worker 回执，天然背压）
+            if (!response.body || typeof response.body.getReader !== 'function') {
+                const buffer = await response.arrayBuffer();
+                if (buffer.byteLength > 0) {
+                    await dlWorkerRequest(worker, { type: 'write', chunk: buffer }, [buffer]);
+                    offset += buffer.byteLength;
+                }
+            } else {
+                const reader = response.body.getReader();
+                for (;;) {
+                    const chunk = await reader.read();
+                    if (chunk.done) break;
+                    const value = chunk.value;
+                    const size = value.byteLength;
+                    if (!size) continue;
+                    // transferable：零拷贝移交，避免大块反复复制
+                    await dlWorkerRequest(worker, { type: 'write', chunk: value }, [value.buffer]);
+                    offset += size;
+                    if (typeof onProgress === 'function') onProgress({ loaded: offset, total: total });
+                    dlResumeSave(resumeKey, {
+                        partName: partName, offset: offset, total: total, fileName: finalName
+                    });
+                }
+            }
+
+            const closed = await dlWorkerRequest(worker, { type: 'close' });
+            const written = (closed && closed.offset) || offset;
+            if (!written) throw new Error('下载内容为空（0 字节）');
+            if (total && written !== total) {
+                throw new Error('下载不完整（' + fmtSize(written) + ' / ' + fmtSize(total) + '），已保留断点，可重试');
+            }
+
+            return { fileName: finalName, totalBytes: written, partName: partName };
+        } catch (err) {
+            await dlCloseOpfsWorker(worker);
+            // 传输还没开始就失败（CSP / OPFS 配额 / Worker 初始化）→ 返回 null 让调用方降级；
+            // 传输中途失败 → 抛出，OPFS 文件与断点记录都保留，用户重试即可续上。
+            if (!started) {
+                say('断点续传通道启用失败，改用直接写入：' + ((err && err.message) || err), 'warn');
+                return null;
+            }
+            throw err;
+        } finally {
+            try { worker.terminate(); } catch (ignored) { /* 已终止则忽略 */ }
+            try { URL.revokeObjectURL(made.url); } catch (ignored) { /* 忽略 */ }
+        }
+    }
+
+    /**
+     * 把 OPFS 里的 .part 复制到目标目录，成功后删除临时文件。
+     * 复制走 Blob.stream() → pipeTo(createWritable)，内存恒定，不会把整个文件读进来。
+     */
+    async function dlCommitOpfsToDir(dirHandle, partName, finalName) {
+        const opfsRoot = await navigator.storage.getDirectory();
+        const partHandle = await opfsRoot.getFileHandle(partName);
+        const file = await partHandle.getFile();
+        const targetHandle = await dirHandle.getFileHandle(finalName, { create: true });
+        const writable = await targetHandle.createWritable();
+        try {
+            if (file.stream && typeof file.stream === 'function') {
+                await file.stream().pipeTo(writable);
+            } else {
+                await writable.write(await file.arrayBuffer());
+                await writable.close();
+            }
+        } catch (err) {
+            try { await writable.abort(); } catch (ignored) { /* 忽略 */ }
+            await dlRemoveEntry(dirHandle, finalName);
+            throw err;
+        }
+        try { await opfsRoot.removeEntry(partName); } catch (ignored) { /* 删不掉不影响结果 */ }
+        return finalName;
     }
 
     /** 进度节流：大文件每读一块都改 DOM 会把页面拖卡 */
@@ -2097,7 +2423,9 @@
         // 写盘函数拿到响应后还会再确认一次，这里探测只是让落盘名从一开始就正确。
         const probedName = await dlProbeFileName(url, fileName);
         if (opts.rootHandle) {
-            const finalName = await dlSaveToRoot(opts.rootHandle, folder, probedName, url, opts.onProgress);
+            const finalName = await dlSaveToRoot(
+                opts.rootHandle, folder, probedName, url, opts.onProgress, opts.resumeKey, opts.log
+            );
             return { channel: 'fs', fileName: finalName };
         }
         await gmDownloadTo(url, folder + '/' + probedName, {
@@ -2341,7 +2669,10 @@
         });
         const put = await archivePutFile(folder, fileName, url, {
             rootHandle: opts.rootHandle,
+            // 断点续传按 fileId 记账：同一文件重试能接上，不同文件互不干扰
+            resumeKey: opts.fileId ? ('file-' + opts.fileId) : '',
             onProgress: progress,
+            log: log,
             onLateError: function (reason) { log('下载中断：' + fileName + ' — ' + reason, 'err'); }
         });
         // put.fileName 才是真正落盘的名字（重定向后才拿到 CDN 真实文件名）

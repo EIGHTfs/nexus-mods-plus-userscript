@@ -59,7 +59,9 @@ const functions = [
     'collectImagesFromDom',
     'dlResolveFinalFileName',
     'dlDispositionFileName',
-    'dlPickFileNameFromParts'
+    'dlPickFileNameFromParts',
+    'dlTotalFromContentRange',
+    'dlStartFromContentRange'
 ].map(extractFunction).join('\n\n');
 
 /** 最小 DOM 桩：只提供 collectImagesFromDom 用到的那点能力 */
@@ -193,6 +195,21 @@ check('兜底定名：没有 CD 头时用 finalUrl 末段',
 check('兜底定名：都拿不到才用提示名',
     dlPickFileNameFromParts('', 'https://www.nexusmods.com/Core/Libs/Common/Widgets/DownloadFile', 'Real.zip'),
     'Real.zip');
+
+// ---------- Content-Range 解析（断点续传的起点与总大小） ----------
+const { dlTotalFromContentRange, dlStartFromContentRange } = context;
+check('Content-Range：解析总大小',
+    dlTotalFromContentRange('bytes 0-1023/211334'),
+    211334);
+check('Content-Range：解析续传起点',
+    dlStartFromContentRange('bytes 105667-211333/211334'),
+    105667);
+check('Content-Range：空值返回 0 / -1（CORS 未暴露该头时的真实情况）',
+    [dlTotalFromContentRange(''), dlStartFromContentRange('')],
+    [0, -1]);
+check('Content-Range：格式异常不崩',
+    [dlTotalFromContentRange('garbage'), dlStartFromContentRange('garbage')],
+    [0, -1]);
 
 const failed = results.filter((r) => !r.ok);
 console.log('\n结果：' + (results.length - failed.length) + '/' + results.length + ' 通过');
