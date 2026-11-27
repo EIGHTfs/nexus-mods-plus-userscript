@@ -84,6 +84,33 @@
     // ==================== 通用工具 ====================
 
     const $ = (sel, root) => (root || document).querySelector(sel);
+
+    /**
+     * 创建元素的一行写法：el('button', { id: 'x', className: 'y', text: '下载' }, [子节点…])
+     * 原先到处是 createElement + 逐行赋 id/className，重复且容易漏设置。
+     */
+    const el = (tag, attrs, children) => {
+        const node = document.createElement(tag);
+        if (attrs) {
+            Object.keys(attrs).forEach(function (key) {
+                const value = attrs[key];
+                if (value == null) return;
+                if (key === 'text') node.textContent = value;
+                else if (key === 'html') node.innerHTML = value;
+                else node.setAttribute(key, value);
+            });
+        }
+        (children || []).forEach(function (child) {
+            if (child) node.appendChild(child);
+        });
+        return node;
+    };
+
+    /** 绑定事件：节点可能不存在时静默跳过，省掉一层 if 判断 */
+    const on = (node, type, handler) => {
+        if (node && node.addEventListener) node.addEventListener(type, handler);
+        return node;
+    };
     const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
     function fmtNum(n) {
@@ -1163,9 +1190,7 @@
         }
         if ($('#nme-fab-btns')) return $('#nme-fab-btns');
 
-        const card = document.createElement('div');
-        card.id = 'nme-fab-card';
-        card.className = 'nme-fab-card';
+        const card = el('div', { id: 'nme-fab-card', className: 'nme-fab-card' });
         card.hidden = true;
         card.innerHTML = [
             '<div class="nme-fab-head">',
@@ -1175,9 +1200,7 @@
             '<div id="nme-fab-body" class="nme-fab-body"></div>'
         ].join('');
 
-        const btns = document.createElement('div');
-        btns.id = 'nme-fab-btns';
-        btns.className = 'nme-fab-btns';
+        const btns = el('div', { id: 'nme-fab-btns', className: 'nme-fab-btns' });
 
         if (ctx.mode === 'detail') {
             const b = document.createElement('button');
@@ -1189,18 +1212,14 @@
             btns.appendChild(b);
         }
 
-        const d = document.createElement('button');
-        d.id = 'nme-fab-dl';
-        d.className = 'nme-fab-btn nme-fab-btn-dl';
+        const d = el('button', { id: 'nme-fab-dl', className: 'nme-fab-btn nme-fab-btn-dl' });
         d.type = 'button';
         d.textContent = ctx.mode === 'collection' ? '⬇ 合集下载' : '⬇ 下载';
         d.title = ctx.mode === 'collection' ? '合集批量下载' : '文件列表与一键下载';
         btns.appendChild(d);
 
         // AI 接口配置：独立浮动按钮，直接打开配置弹窗
-        const c = document.createElement('button');
-        c.id = 'nme-fab-cfg';
-        c.className = 'nme-fab-btn nme-fab-btn-cfg';
+        const c = el('button', { id: 'nme-fab-cfg', className: 'nme-fab-btn nme-fab-btn-cfg' });
         c.type = 'button';
         c.textContent = '⚙ 配置';
         c.title = 'AI 接口配置';
@@ -1294,8 +1313,7 @@
         const sec = fabSection(FAB_SEC_AI);
         if (!sec) return;
 
-        const bar = document.createElement('div');
-        bar.id = 'nme-ai-bar';
+        const bar = el('div', { id: 'nme-ai-bar' });
         bar.innerHTML = [
             '<div class="nme-ai-head">',
             '  <span class="nme-ai-title">N网 AI</span>',
@@ -1468,8 +1486,7 @@
     function openSettings(focusSection) {
         if ($('#nme-ai-cfg-modal')) return;
         const dlFolder = typeof CFG.dlFolder === 'boolean' ? CFG.dlFolder : true;
-        const modal = document.createElement('div');
-        modal.id = 'nme-ai-cfg-modal';
+        const modal = el('div', { id: 'nme-ai-cfg-modal' });
         modal.innerHTML = [
             '<div class="nme-ai-modal">',
             '  <div class="nme-ai-modal-title">脚本设置</div>',
@@ -3317,8 +3334,7 @@
         const sec = fabSection(FAB_SEC_DL);
         if (!sec) return;
 
-        const bar = document.createElement('div');
-        bar.id = 'nme-dl-bar';
+        const bar = el('div', { id: 'nme-dl-bar' });
         bar.innerHTML = [
             '<div class="nme-dl-head">',
             '  <span class="nme-dl-title">N网 下载</span>',
@@ -3602,8 +3618,7 @@
         if (!row) return;
         const nameEl = row.querySelector('.nme-dl-name');
         if (!nameEl || nameEl.querySelector('.nme-dl-done')) return;
-        const badge = document.createElement('span');
-        badge.className = 'nme-dl-done';
+        const badge = el('span', { className: 'nme-dl-done' });
         badge.textContent = '已下载';
         nameEl.appendChild(badge);
     }
@@ -3755,8 +3770,7 @@
         const sec = fabSection(FAB_SEC_DL);
         if (!sec) return;
 
-        const bar = document.createElement('div');
-        bar.id = 'nme-dl-bar';
+        const bar = el('div', { id: 'nme-dl-bar' });
         bar.innerHTML = [
             '<div class="nme-dl-head">',
             '  <span class="nme-dl-title">N网 合集下载</span>',
@@ -4502,8 +4516,7 @@
     // ==================== 工具条 ====================
 
     function buildPanel(ctx) {
-        const panel = document.createElement('div');
-        panel.id = 'nme-panel';
+        const panel = el('div', { id: 'nme-panel' });
 
         const sortOptions = SORTS.map(function (s) {
             return '<option value="' + s[0] + '"' + (s[0] === CFG.sortBy ? ' selected' : '') + '>' + s[1] + '</option>';
@@ -4778,8 +4791,7 @@
         const dock = ensureDock();
 
         // 收起态按钮
-        const btn = document.createElement('button');
-        btn.id = 'nme-cap-btn';
+        const btn = el('button', { id: 'nme-cap-btn' });
         btn.type = 'button';
         btn.innerHTML =
             '<span id="nme-cap-dot" class="nme-cap-dot" aria-hidden="true"></span>' +
@@ -4787,8 +4799,7 @@
             '<span class="nme-cap-caret" aria-hidden="true">▾</span>';
 
         // 展开态面板
-        const panel = document.createElement('div');
-        panel.id = 'nme-cap-panel';
+        const panel = el('div', { id: 'nme-cap-panel' });
         panel.setAttribute('role', 'dialog');
         panel.setAttribute('aria-label', 'N网增强 快捷操作');
 
