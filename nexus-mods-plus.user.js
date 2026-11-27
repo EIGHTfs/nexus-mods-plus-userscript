@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强
 // @name:en      Nexus Mods Enhancer
 // @namespace    nexusmods-enhancer
-// @version      1.6.0
+// @version      1.6.1
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，安装包与预览图归档进同一目录，图片也可单独下，支持断点续传；脚本设置面板集中管理下载/界面/AI），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable, with a unified settings panel), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -31,7 +31,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.6.0';
+    const VERSION = '1.6.1';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -2086,6 +2086,9 @@
                 }
             }
         } catch (fetchError) {
+            // 切后台主动中止时直接抛出：交给前台的守卫处理，
+            // 绝不能落到 GM_xhr 兜底，否则会把整个文件读进内存
+            if (dlIsAbortError(fetchError)) throw fetchError;
             // fetch 通道失败（CORS / 403 / 网络）：改用 GM_xhr 取完整 blob 再写
             if (typeof GM_xmlhttpRequest !== 'function') {
                 await dlRemoveEntry(dirHandle, finalName);
@@ -2166,10 +2169,12 @@
         const opts = options || {};
         const baseInit = { method: opts.method || 'GET' };
         if (opts.headers) baseInit.headers = opts.headers;
+        if (opts.signal) baseInit.signal = opts.signal;
         let response = await fetch(url, baseInit);
         if (response.status === 401 || response.status === 403) {
             try {
-                response = await fetch(url, Object.assign({}, baseInit, { credentials: 'include' }));
+                const retryInit = Object.assign({}, baseInit, { credentials: 'include' });
+                response = await fetch(url, retryInit);
             } catch (ignored) {
                 // 带凭据被 CORS 拒绝时保留第一次的响应，走原有错误处理
             }
@@ -2239,6 +2244,7 @@
     //   · 页面 CSP 可能禁止 blob: Worker，创建失败时抛错，调用方据此降级到原直写通道。
 
     const DL_RESUME_PREFIX = 'nme.resume.';       // 断点记录的存储前缀
+    let dlVisibilityController = null;            // 当前下载的 fetch 控制器：切后台时用它主动中止
     const DL_OPFS_PART_SUFFIX = '.nme-part';      // OPFS 里的临时文件名后缀
 
     /**
@@ -2427,9 +2433,14 @@
             }
 
             // 3) 发请求：有断点就带 Range
+            //    挂上可中止信号：页面切后台时主动掐断，回前台再重入续传，避免以「网络错误」收场
+            dlVisibilityController = new AbortController();
             const headers = {};
             if (offset > 0) headers['Range'] = 'bytes=' + offset + '-';
-            const response = await dlFetchForDownload(url, { headers: headers });
+            const response = await dlFetchForDownload(url, {
+                headers: headers,
+                signal: dlVisibilityController.signal
+            });
             if (!response.ok) throw new Error('HTTP ' + response.status);
 
             let finalName = dlResolveFinalFileName(response, fileNameHint);
@@ -2503,6 +2514,8 @@
             return { fileName: finalName, totalBytes: written, partName: partName };
         } catch (err) {
             await dlCloseOpfsWorker(worker);
+            // 切后台被我们主动中止：交给上层前台的守卫，回前台会重入续传，不要当成通道故障降级
+            if (dlIsAbortError(err)) throw err;
             // 传输还没开始就失败（CSP / OPFS 配额 / Worker 初始化）→ 返回 null 让调用方降级；
             // 传输中途失败 → 抛出，OPFS 文件与断点记录都保留，用户重试即可续上。
             if (!started) {
@@ -2511,6 +2524,7 @@
             }
             throw err;
         } finally {
+            dlVisibilityController = null;
             try { worker.terminate(); } catch (ignored) { /* 已终止则忽略 */ }
             try { URL.revokeObjectURL(made.url); } catch (ignored) { /* 忽略 */ }
         }
@@ -2540,6 +2554,63 @@
         }
         try { await opfsRoot.removeEntry(partName); } catch (ignored) { /* 删不掉不影响结果 */ }
         return finalName;
+    }
+
+    // ---------- 页面可见性：切后台优雅暂停 ----------
+    //
+    // 浏览器把后台页面冻结后，fetch 的响应回调无法继续执行，下载会以「网络错误」告终。
+    // 与其让它自然断掉报错，不如自己先中止：断点本来就每块都存着，
+    // 回到前台再重入一次就是从 offset 接着下，用户看不到失败。
+
+    /** 主动中止当前下载请求（仅用于切后台场景） */
+    function dlAbortCurrentFetch() {
+        if (!dlVisibilityController) return;
+        try { dlVisibilityController.abort(); } catch (ignored) { /* 已结束就忽略 */ }
+    }
+
+    /** 是否为「我们自己中止」造成的错误，用来把它和真正的网络错误区分开 */
+    function dlIsAbortError(err) {
+        if (!err) return false;
+        if (err.name === 'AbortError') return true;
+        return /abort/i.test(String(err.message || ''));
+    }
+
+    /** 等到页面重新可见；已经可见则立即返回 */
+    function dlWaitVisible() {
+        return new Promise(function (resolve) {
+            if (!document.hidden) { resolve(true); return; }
+            const onVisible = function () {
+                if (document.hidden) return;
+                document.removeEventListener('visibilitychange', onVisible);
+                resolve(true);
+            };
+            document.addEventListener('visibilitychange', onVisible);
+        });
+    }
+
+    /**
+     * 在前台约束下执行下载动作。
+     * fn 必须可安全重入（靠断点从 offset 继续），所以切后台中止后重试不会重复下载。
+     */
+    async function dlRunWithVisibilityGuard(fn, log) {
+        const say = typeof log === 'function' ? log : function () {};
+        for (let attempt = 0; attempt < 20; attempt++) {
+            if (document.hidden) {
+                say('已暂停：浏览器切到后台，回到前台会自动继续', 'warn');
+                await dlWaitVisible();
+                say('已回到前台，继续下载', 'ok');
+            }
+            try {
+                return await fn();
+            } catch (err) {
+                if (!dlIsAbortError(err)) throw err;
+                // 被切后台中止：等回到前台再重试，断点会让它接着下
+                say('已暂停：浏览器切到后台，回到前台会自动继续', 'warn');
+                await dlWaitVisible();
+                say('已回到前台，继续下载', 'ok');
+            }
+        }
+        throw new Error('反复切换前后台，下载未完成，请保持页面在前台');
     }
 
     /** 进度节流：大文件每读一块都改 DOM 会把页面拖卡 */
@@ -2808,14 +2879,21 @@
         const progress = dlThrottledProgress(function (p) {
             log('下载中 ' + fmtSize(p.loaded) + (p.total ? ' / ' + fmtSize(p.total) : ''), 'busy');
         });
-        const put = await archivePutFile(folder, fileName, url, {
+        const putOptions = {
             rootHandle: opts.rootHandle,
             // 断点续传按 fileId 记账：同一文件重试能接上，不同文件互不干扰
             resumeKey: opts.fileId ? ('file-' + opts.fileId) : '',
             onProgress: progress,
             log: log,
             onLateError: function (reason) { log('下载中断：' + fileName + ' — ' + reason, 'err'); }
-        });
+        };
+        // 文件系统通道由本页自己发请求，切后台会被冻结 → 用守卫优雅暂停并在回前台自动续；
+        // 浏览器下载通道（GM_download）由浏览器进程管理，后台照常下，不需要守卫。
+        const put = opts.rootHandle
+            ? await dlRunWithVisibilityGuard(function () {
+                return archivePutFile(folder, fileName, url, putOptions);
+            }, log)
+            : await archivePutFile(folder, fileName, url, putOptions);
         // put.fileName 才是真正落盘的名字（重定向后才拿到 CDN 真实文件名）
         const finalRelPath = folder + '/' + put.fileName;
         if (put.channel === 'fs') log('已写入所选目录：' + finalRelPath, 'ok');
@@ -5144,6 +5222,12 @@
 
         // 下载等待页：尽早开始等待按钮
         setupDownloadSkip();
+
+        // 页面切到后台时主动中止当前下载请求：
+        // 等浏览器冻结页面再断，fetch 会以「网络错误」收场；主动断则断点齐整，回前台能接着下。
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) dlAbortCurrentFetch();
+        });
 
         const ctx = getContext();
         state.ctx = ctx;
