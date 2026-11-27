@@ -1,6 +1,8 @@
-# Nexus Mods 增强
+# Nexus Mods 增强（下载增强版）
 
 给 Nexus Mods 网页加中文界面、筛选排序、AI 翻译与按 mod 归档下载的油猴脚本。
+
+![下载面板：每行独立进度条，同时下载互不干扰](https://raw.githubusercontent.com/EIGHTfs/nexus-mods-plus-userscript/main/docs/images/download-panel-1.6.4.jpg)
 
 ## 功能
 
