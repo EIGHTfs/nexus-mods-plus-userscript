@@ -101,7 +101,7 @@ async function runFlow(options) {
         URL,
         console,
         document: makeDomStub(options),
-        CFG: Object.assign({ dlImagesWithMod: true, dlImgLimit: 12 }, options.cfg || {}),
+        CFG: Object.assign({ dlImgLimit: 12 }, options.cfg || {}),
         sleep: async () => {},
         // 桩：直链解析结果由用例决定
         resolveWithRetry: async () => ({ url: options.directUrl, filename: options.apiFileName || '' }),
@@ -132,7 +132,8 @@ async function runFlow(options) {
 {
     const { calls, result } = await runFlow({
         directUrl: 'https://supporter-files.nexus-cdn.com/5577/868/Siris%20Drift-868-1-0-1760599327.zip?md5=abc',
-        opts: { modTitle: 'Siris/FreeFin:Azure Drift', fileName: 'Siris-FreeFin_Azure Drift_a little naughty' }
+        // 图片只由独立的「下载图片」按钮触发，这里用 forceImages 模拟该按钮
+        opts: { modTitle: 'Siris/FreeFin:Azure Drift', fileName: 'Siris-FreeFin_Azure Drift_a little naughty', forceImages: true }
     });
     check('用例1：目录名清洗后不再含 / 与 :',
         result.folder,
@@ -154,7 +155,7 @@ async function runFlow(options) {
 {
     const { calls, result } = await runFlow({
         directUrl: 'https://cdn.example.com/x/Mod-1-0.zip',
-        opts: { modTitle: 'Mod', fileName: 'Mod' },
+        opts: { modTitle: 'Mod', fileName: 'Mod', forceImages: true },
         failOn: (url) => url.indexOf('868-2.png') >= 0
     });
     check('用例2：失败的那张图不记录，其余照下',
@@ -168,7 +169,7 @@ async function runFlow(options) {
     const { calls, result } = await runFlow({
         directUrl: 'https://cdn.example.com/x/Mod-1-0.zip',
         opts: { modTitle: 'Mod', fileName: 'Mod' },
-        cfg: { dlImagesWithMod: false }
+        cfg: {}
     });
     check('用例3：只下 mod，不请求图片', calls, ['Mod/Mod-1-0.zip']);
     check('用例3：图片计数 0', result.images, 0);
@@ -180,7 +181,7 @@ async function runFlow(options) {
     const { result } = await runFlow({
         directUrl: 'https://cdn.example.com/x/a.zip',
         opts: { modTitle: longName, fileName: 'a.zip' },
-        cfg: { dlImagesWithMod: false }
+        cfg: {}
     });
     check('用例4：目录名截断到 80 且不以点结尾',
         [result.folder.length, /\.$/.test(result.folder)],
@@ -198,16 +199,16 @@ async function runFlow(options) {
             pictureUrl: 'https://staticdelivery.nexusmods.com/mods/5577/images/999/999-cover.jpeg'
         }
     });
-    check('用例5：合集只下封面一张，不误用当前页图库',
+    check('用例5：合集默认不下图（未点「下载图片」）',
         calls,
-        ['Other Mod/b.zip', 'Other Mod/999-cover.jpeg']);
+        ['Other Mod/b.zip']);
 }
 
 // ---------- 用例 6：图片数量上限生效 ----------
 {
     const { calls } = await runFlow({
         directUrl: 'https://cdn.example.com/x/c.zip',
-        opts: { modTitle: 'Cap', fileName: 'c' },
+        opts: { modTitle: 'Cap', fileName: 'c', forceImages: true },
         cfg: { dlImgLimit: 2 }
     });
     check('用例6：上限 2 张时只请求 2 张图', calls.length, 3);
@@ -218,7 +219,7 @@ async function runFlow(options) {
     const { calls } = await runFlow({
         directUrl: 'https://cdn.example.com/x/d.zip',
         opts: { modTitle: 'Force', fileName: 'd', forceImages: true },
-        cfg: { dlImagesWithMod: false }
+        cfg: {}
     });
     check('用例7：forceImages 时即使关闭附带图片也会下图',
         calls,
@@ -230,7 +231,7 @@ async function runFlow(options) {
     const { calls, result } = await runFlow({
         directUrl: 'https://cdn.example.com/x/e.zip',
         opts: { modTitle: 'Agave Outfit', gameName: 'Snowbreak: Containment Zone', fileName: 'e' },
-        cfg: { dlImagesWithMod: false }
+        cfg: {}
     });
     check('用例8：目录 = <游戏名>/<Mod名>',
         result.folder,
@@ -245,7 +246,7 @@ async function runFlow(options) {
     const { result } = await runFlow({
         directUrl: 'https://cdn.example.com/x/f.zip',
         opts: { modTitle: 'Only Mod', gameName: '', fileName: 'f' },
-        cfg: { dlImagesWithMod: false }
+        cfg: {}
     });
     check('用例9：无游戏名时只有一层 Mod 目录', result.folder, 'Only Mod');
 }
@@ -256,7 +257,7 @@ async function runFlow(options) {
         directUrl: 'https://cdn.example.com/abc/def-1234567890.bin',
         apiFileName: 'Vidya_Agave v1.2.7z',
         opts: { modTitle: 'Agave', fileName: 'Agave Outfit', gameName: 'Snowbreak: Containment Zone' },
-        cfg: { dlImagesWithMod: false }
+        cfg: {}
     });
     check('用例10：用接口文件名，不用 CDN 混淆名',
         calls[0],
@@ -269,7 +270,7 @@ async function runFlow(options) {
         directUrl: 'https://www.nexusmods.com/Core/Libs/Common/Widgets/DownloadFile?file_id=1902',
         domDownloadUrl: 'https://supporter-files.nexus-cdn.com/5577/1056/Enya_Tempest(default)_a little naughty-868-1902-1-1762417842.zip?md5=x',
         opts: { modTitle: 'Enya', gameName: 'Snowbreak: Containment Zone', fileName: 'Enya_Tempest(default)_a little naughty' },
-        cfg: { dlImagesWithMod: false }
+        cfg: {}
     });
     check('用例11：用 DOM 直链末段的站点真名',
         calls[0],

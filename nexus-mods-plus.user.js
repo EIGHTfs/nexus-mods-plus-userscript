@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强
 // @name:en      Nexus Mods Enhancer
 // @namespace    nexusmods-enhancer
-// @version      1.6.3
+// @version      1.6.4
 // @description  Nexus Mods 中文增强：每页 80 条 + 无限滚动、9 种排序、简中/繁中/翻译与下载量·点赞·体积筛选、中文游戏名一键直达；界面中文化与模组语言徽章；模组页 AI 翻译/结构化分析 + 文件直链下载，下载时自动按 mod 名建文件夹（可选保存目录，压缩包与预览图归档进同一目录，图片也可单独下，支持断点续传；脚本设置面板集中管理下载/界面/AI，文件页下载面板标出已下载的 mod），合集批量下载（进度·暂停·断点），下载历史自动标出有更新的模组。
 // @description:en  A Chinese-first Nexus Mods enhancer: 80 items per page with infinite scroll, 9 sort modes, Chinese/language plus downloads·endorsements·size filters, Chinese game-name lookup, localized UI and language badges; AI translation and structured analysis with direct file downloads on mod pages, downloads auto-filed into a per-mod folder under a chosen directory (archive plus preview images, images downloadable separately, resumable, with a unified settings panel and downloaded-file markers), collection batch download with progress/pause/resume, and update highlighting in download history.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -31,7 +31,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.6.3';
+    const VERSION = '1.6.4';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -56,8 +56,8 @@
         skipWait: true,    // 下载等待页自动跳过
         dlGap: 5,          // 合集批量下载间隔（秒）
         dlFolder: true,    // 按 mod 名建文件夹归档（GM_download 子目录）
-        // 图片默认不跟着压缩包一起下：图库动辄十几张，每次下 mod 都顺带请求一遍
-        // 既费流量也拖慢下载队列。改为面板上独立的「下载图片」按钮按需触发。
+        // 图片不跟着压缩包一起下：图库动辄十几张，顺带请求既费流量也拖慢队列。
+        // 已改为面板上独立的「下载图片」按钮；此字段仅保留以兼容旧配置，代码不再读取。
         dlImagesWithMod: false,
         dlImgLimit: 12     // 单个 mod 最多下载几张图片（0 = 不限）
     };
@@ -1015,6 +1015,7 @@
     const Q_MOD_DETAIL = `query ModDetail($modId: ID!, $gameId: ID!) {
   mod(modId: $modId, gameId: $gameId) {
     modId name summary description version author createdAt updatedAt downloads endorsements fileSize pictureUrl
+    viewerDownloaded
     game { id domainName name }
     modCategory { name }
     tags { name }
@@ -1317,11 +1318,16 @@
 
     async function ensureModDetail(ctx) {
         const want = Number(ctx.modId);
-        if (state.modCache && Number(state.modCache.modId) === want) return state.modCache;
+        if (state.modCache && Number(state.modCache.modId) === want) {
+            rememberViewerDownloaded(state.modCache);
+            return state.modCache;
+        }
         // AI 条与下载条会同时挂载：复用同一次请求，避免重复打 GraphQL
         if (state.modLoading && state.modLoading.id === want) return state.modLoading.p;
         const p = fetchModDetail(ctx.domain, ctx.modId).then(function (mod) {
             state.modCache = mod;
+            // 顺手记下「我下载过没」：任何页面都能拿到，用于没有文件级信息时的总体提示
+            rememberViewerDownloaded(mod);
             state.modLoading = null;
             return mod;
         }, function (e) {
@@ -1456,7 +1462,6 @@
     function openSettings(focusSection) {
         if ($('#nme-ai-cfg-modal')) return;
         const dlFolder = typeof CFG.dlFolder === 'boolean' ? CFG.dlFolder : true;
-        const dlImagesWithMod = typeof CFG.dlImagesWithMod === 'boolean' ? CFG.dlImagesWithMod : false;
         const modal = document.createElement('div');
         modal.id = 'nme-ai-cfg-modal';
         modal.innerHTML = [
@@ -1470,7 +1475,6 @@
             '  </div>',
             '  <div class="nme-ai-modal-help">选一次目录后，下载会自动在该目录下建 <code>游戏名/Mod 名/</code>；不选则退回浏览器下载目录，那条通道是否建文件夹取决于脚本管理器。</div>',
             '  <label class="nme-cfg-check"><input id="nme-cfg-folder" type="checkbox"> 按 mod 建文件夹</label>',
-            '  <label class="nme-cfg-check"><input id="nme-cfg-imgwith" type="checkbox"> 下载压缩包时附带图片</label>',
             '  <div class="nme-cfg-row">',
             '    <span class="nme-cfg-label">每个 mod 最多图片数</span>',
             '    <input id="nme-cfg-imglimit" class="nme-cfg-num" type="number" min="0" max="50" step="1">',
@@ -1508,7 +1512,6 @@
         const pick = function (id) { return modal.querySelector(id); };
         const dirBtn = pick('#nme-cfg-dir');
         const folderEl = pick('#nme-cfg-folder');
-        const imgWithEl = pick('#nme-cfg-imgwith');
         const imgLimitEl = pick('#nme-cfg-imglimit');
         const gapEl = pick('#nme-cfg-gap');
         const skipWaitEl = pick('#nme-cfg-skipwait');
@@ -1522,7 +1525,6 @@
 
         // 回填当前值
         folderEl.checked = dlFolder;
-        imgWithEl.checked = dlImagesWithMod;
         imgLimitEl.value = String(CFG.dlImgLimit == null ? 12 : CFG.dlImgLimit);
         gapEl.value = String(CFG.dlGap == null ? 5 : CFG.dlGap);
         skipWaitEl.checked = !!CFG.skipWait;
@@ -1577,7 +1579,6 @@
             const oldBadges = !!CFG.badges;
 
             CFG.dlFolder = folderEl.checked;
-            CFG.dlImagesWithMod = imgWithEl.checked;
             CFG.dlImgLimit = clampNumber(imgLimitEl.value, 0, 50, 12);
             CFG.dlGap = clampNumber(gapEl.value, 1, 60, 5);
             CFG.skipWait = skipWaitEl.checked;
@@ -1665,7 +1666,10 @@
         const t = dlRecent[fileId];
         return !!t && (Date.now() - t) < DL_REPEAT_GUARD;
     }
-    function markDl(fileId) { dlRecent[fileId] = Date.now(); }
+    function markDl(fileId) {
+        dlRecent[fileId] = Date.now();
+        dlLocalDoneMark(fileId);
+    }
 
     const Q_MOD_FILES = `query ModFiles($modId: ID!, $gameId: ID!) {
   modFiles(modId: $modId, gameId: $gameId) {
@@ -2250,6 +2254,8 @@
     //   · 页面 CSP 可能禁止 blob: Worker，创建失败时抛错，调用方据此降级到原直写通道。
 
     const DL_RESUME_PREFIX = 'nme.resume.';       // 断点记录的存储前缀
+    const DL_LOCAL_DONE_KEY = 'nme.downloadedFiles';   // 本机下载过的文件（fileId → 时间戳）
+    const DL_LOCAL_DONE_MAX = 3000;                    // 记录上限，超出按最旧淘汰
     let dlVisibilityController = null;            // 当前下载的 fetch 控制器：切后台时用它主动中止
     const DL_OPFS_PART_SUFFIX = '.nme-part';      // OPFS 里的临时文件名后缀
 
@@ -2887,7 +2893,13 @@
         log('保存到 ' + relPath, 'ok');
         // 进度节流：大文件每块都刷面板会把页面拖卡
         const progress = dlThrottledProgress(function (p) {
-            log('下载中 ' + fmtSize(p.loaded) + (p.total ? ' / ' + fmtSize(p.total) : ''), 'busy');
+            const loaded = Number(p && p.loaded) || 0;
+            const total = Number(p && p.total) || 0;
+            const percent = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
+            log('下载中 ' + fmtProgressBar(loaded, total) + ' ' +
+                (total ? percent + '% · ' + fmtSize(loaded) + ' / ' + fmtSize(total) : fmtSize(loaded)), 'busy');
+            // 行内进度条由调用方提供，并发下载各自更新自己那一行
+            if (typeof opts.onProgress === 'function') opts.onProgress({ loaded: loaded, total: total });
         });
         const putOptions = {
             rootHandle: opts.rootHandle,
@@ -2910,8 +2922,8 @@
         else log('⚠ 没走保存目录（' + (dlRootProblemText(opts.rootReason) || '未授权') +
             '），已退回浏览器下载，这条通道不保证建文件夹', 'warn');
 
-        // 图片默认不跟着压缩包走（见 DEFAULTS 注释）；独立按钮调用时用 forceImages 显式要求
-        if (!opts.forceImages && !CFG.dlImagesWithMod) return { folder: folder, file: put.fileName, images: 0 };
+        // 图片只由独立的「下载图片」按钮触发（forceImages）；下载压缩包时不再顺带请求图片
+        if (!opts.forceImages) return { folder: folder, file: put.fileName, images: 0 };
 
         const images = collectArchiveImages(opts);
         if (!images.length) {
@@ -3015,7 +3027,7 @@
         if (!root) return;
         const supported = dlHasArchiveChannel();
         const folderBox = root.querySelector('#nme-dl-folder');
-        const imagesBox = root.querySelector('#nme-dl-imgwith');
+
         if (folderBox) {
             folderBox.checked = !!CFG.dlFolder && supported;
             folderBox.disabled = !supported;
@@ -3026,18 +3038,6 @@
             }
             folderBox.addEventListener('change', function () {
                 CFG.dlFolder = folderBox.checked;
-                saveCfg();
-            });
-        }
-        if (imagesBox) {
-            imagesBox.checked = !!CFG.dlImagesWithMod;
-            imagesBox.disabled = !supported;
-            if (imagesBox.parentElement) {
-                imagesBox.parentElement.title = '勾选后，下载压缩包时会顺带把预览图下到同一文件夹；' +
-                    '不勾则改用旁边的「下载图片」按钮单独触发（默认不勾，避免每次下 mod 都额外请求一堆图）';
-            }
-            imagesBox.addEventListener('change', function () {
-                CFG.dlImagesWithMod = imagesBox.checked;
                 saveCfg();
             });
         }
@@ -3142,7 +3142,6 @@
             '<div class="nme-dl-actions">',
             '  <button id="nme-dl-refresh" class="nme-dl-btn" type="button">刷新文件列表</button>',
             '  <label class="nme-dl-opt"><input id="nme-dl-folder" type="checkbox"> 按 mod 建文件夹</label>',
-            '  <label class="nme-dl-opt"><input id="nme-dl-imgwith" type="checkbox"> 下载时附带图片</label>',
             '  <button id="nme-dl-images-btn" class="nme-dl-btn" type="button">下载图片</button>',
             '  <button id="nme-dl-root-btn" class="nme-dl-btn" type="button">选择保存目录</button>',
             '  <span id="nme-dl-status" class="nme-ai-status"></span>',
@@ -3185,6 +3184,88 @@
         } catch (e) {
             list.innerHTML = '<div class="nme-dl-empty nme-dl-err">' + escapeHtml((e && e.message) || String(e)) + '</div>';
         }
+    }
+
+    // ---------- 下载进度显示 ----------
+    //
+    // 进度只有一个状态行时，并发下载会互相覆盖（谁最后回调就显示谁），
+    // 所以每个文件行自带一条进度，行内各自独立；状态行只留摘要。
+
+    const DL_PROGRESS_BAR_WIDTH = 10;   // 文本进度条的格数
+
+    /** 文本进度条：[██████░░░░] */
+    function fmtProgressBar(loaded, total, width) {
+        const cells = width || DL_PROGRESS_BAR_WIDTH;
+        const totalBytes = Number(total) || 0;
+        if (!totalBytes) return '';
+        const ratio = Math.max(0, Math.min(1, (Number(loaded) || 0) / totalBytes));
+        const filled = Math.round(ratio * cells);
+        return '[' + '█'.repeat(filled) + '░'.repeat(cells - filled) + ']';
+    }
+
+    /**
+     * 拿到（或创建）某个文件行自己的进度条 UI。
+     * 每个行独立，天然互不干扰，多个下载同时进行也不会抢同一个位置。
+     */
+    function rowProgressUi(row) {
+        if (!row) return null;
+        let wrap = row.querySelector('.nme-dl-prog-wrap');
+        if (!wrap) {
+            const main = row.querySelector('.nme-dl-main');
+            if (!main) return null;
+            wrap = document.createElement('div');
+            wrap.className = 'nme-dl-prog-wrap';
+            wrap.style.display = 'none';
+            wrap.innerHTML = '<div class="nme-dl-prog"><div class="nme-dl-prog-bar"></div></div>' +
+                '<div class="nme-dl-prog-text"></div>';
+            main.appendChild(wrap);
+        }
+        const bar = wrap.querySelector('.nme-dl-prog-bar');
+        const text = wrap.querySelector('.nme-dl-prog-text');
+        return {
+            start: function () {
+                wrap.style.display = '';
+                bar.style.width = '0%';
+                text.textContent = '准备中…';
+            },
+            update: function (p) {
+                const loaded = Number(p && p.loaded) || 0;
+                const total = Number(p && p.total) || 0;
+                const percent = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
+                bar.style.width = percent + '%';
+                text.textContent = fmtSize(loaded) +
+                    (total ? ' / ' + fmtSize(total) + ' · ' + percent + '%' : '');
+            },
+            finish: function () { wrap.style.display = 'none'; }
+        };
+    }
+
+    /** 读取本机下载过的文件记录：{ fileId: 时间戳 } */
+    function dlLocalDoneLoad() {
+        try {
+            const raw = GM_getValue(DL_LOCAL_DONE_KEY, '');
+            const map = raw ? JSON.parse(raw) : {};
+            return (map && typeof map === 'object') ? map : {};
+        } catch (e) { return {}; }
+    }
+
+    /**
+     * 记一笔「这个文件本机下载过」。
+     * 页面上的 Downloaded 状态只在文件页有；本机记录则任意页面都能用，
+     * 所以两者合并后，描述页也能标出下载过的文件。
+     */
+    function dlLocalDoneMark(fileId) {
+        if (fileId == null || fileId === '') return;
+        try {
+            const map = dlLocalDoneLoad();
+            map[String(fileId)] = Date.now();
+            const ids = Object.keys(map);
+            if (ids.length > DL_LOCAL_DONE_MAX) {
+                ids.sort(function (a, b) { return (map[a] || 0) - (map[b] || 0); });
+                ids.slice(0, ids.length - DL_LOCAL_DONE_MAX).forEach(function (id) { delete map[id]; });
+            }
+            GM_setValue(DL_LOCAL_DONE_KEY, JSON.stringify(map));
+        } catch (e) { /* 存不了不影响下载 */ }
     }
 
     /** 文件名归一：折叠空白 + 转小写，用于「页面上的文件名」与接口返回的文件名对号 */
@@ -3256,6 +3337,16 @@
         nameEl.appendChild(badge);
     }
 
+    /**
+     * 记下当前 mod 的「我下载过没」（来自 GraphQL viewerDownloaded）。
+     * 文件级的个人下载状态 API 不提供，只有文件页 DOM 有；
+     * mod 级状态则任何页面都能查，用来在没有文件级信息时给一句总体提示。
+     */
+    function rememberViewerDownloaded(mod) {
+        if (!mod) return;
+        state.dlViewerDownloaded = (mod.viewerDownloaded === true);
+    }
+
     function renderDetailFiles(files) {
         const list = $('#nme-dl-list');
         if (!list) return;
@@ -3263,10 +3354,21 @@
             list.innerHTML = '<div class="nme-dl-empty">该模组还没有公开文件。</div>';
             return;
         }
-        // 把页面上「Downloaded」状态同步过来，省得用户自己在页面和面板之间来回对
+        // 已下载状态 = 页面信号（仅文件页有）+ 本机记录（任意页面可用）
         const downloaded = collectDownloadedFilesFromPage();
+        const localDone = dlLocalDoneLoad();
+        Object.keys(localDone).forEach(function (id) {
+            if (!downloaded.byFileId[id]) downloaded.byFileId[id] = true;
+        });
         const isDownloaded = function (file) { return isFileDownloaded(downloaded, file); };
-        list.innerHTML = files.map(function (f, i) {
+        // 文件级标记全空、但 mod 级显示下载过：说明是在别处（官网/Vortex/旧记录）下过的，
+        // 这时给一句总体提示，避免用户以为「页面说有下载、面板却啥都不标」。
+        // 注意要拼进 innerHTML 前缀，写在赋值之后再 append 会被整体覆盖。
+        const anyFileDone = files.some(function (f) { return isDownloaded(f); });
+        const modLevelHint = (!anyFileDone && state.dlViewerDownloaded)
+            ? '<div class="nme-dl-meta">你下载过这个 mod（具体是哪个文件，接口查不到）</div>'
+            : '';
+        list.innerHTML = modLevelHint + files.map(function (f, i) {
             const tag = f.category ? '<span class="nme-dl-tag">' + escapeHtml(f.category) + '</span>' : '';
             const doneTag = isDownloaded(f) ? '<span class="nme-dl-done">已下载</span>' : '';
             const meta = [
@@ -3292,6 +3394,8 @@
         const old = btn.textContent;
         btn.disabled = true;
         btn.textContent = '获取中…';
+        // 每个文件行自带一条进度：并发下载时各更新各的，不会互相覆盖
+        const rowUi = rowProgressUi(btn && typeof btn.closest === 'function' ? btn.closest('.nme-dl-row') : null);
         dlStatus('正在获取「' + (file.name || file.fileId) + '」的下载地址…', 'busy');
         try {
             // 归档模式：<游戏名>/<Mod名>/，压缩包与预览图都进去
@@ -3304,6 +3408,8 @@
                 const meta = await resolveArchiveMeta(ctx);
                 const target = archiveFolderPath(meta.gameName, meta.modTitle);
                 dlStatus('正在下载到 ' + target + '/ …', 'busy');
+                if (rowUi) rowUi.start();
+                btn.textContent = '下载中…';
                 const result = await archiveDownload({
                     domain: ctx.domain,
                     modId: ctx.modId,
@@ -3317,8 +3423,10 @@
                     ctxMode: 'detail',
                     rootHandle: root.handle,
                     rootReason: root.reason,
+                    onProgress: rowUi ? function (p) { rowUi.update(p); } : null,
                     log: function (text, kind) { dlStatus(text, kind); }
                 });
+                if (rowUi) rowUi.finish();
                 markDl(file.fileId);
                 markPanelRowDownloaded(btn);
                 dlStatus('已加入下载：' + result.folder + '/' + result.file +
@@ -3332,6 +3440,7 @@
             markPanelRowDownloaded(btn);
             dlStatus('已开始下载：' + (file.name || file.fileId), 'ok');
         } catch (e) {
+            if (rowUi) rowUi.finish();
             dlStatus((e && e.message) || String(e), 'err');
         } finally {
             btn.disabled = false;
@@ -3379,7 +3488,6 @@
             '<div class="nme-dl-actions">',
             '  <label class="nme-dl-meta">间隔 <input id="nme-dl-gap" class="nme-dl-gap" type="number" min="1" max="60" step="1"></label>',
             '  <label class="nme-dl-opt"><input id="nme-dl-folder" type="checkbox"> 按 mod 建文件夹</label>',
-            '  <label class="nme-dl-opt"><input id="nme-dl-imgwith" type="checkbox"> 下载时附带图片</label>',
             '  <button id="nme-dl-root-btn" class="nme-dl-btn" type="button">选择保存目录</button>',
             '  <button id="nme-dl-start" class="nme-dl-btn nme-dl-btn-accent" type="button" disabled>开始下载</button>',
             '  <button id="nme-dl-pause" class="nme-dl-btn" type="button" disabled>暂停</button>',
@@ -4840,6 +4948,11 @@
             '#nme-dl-bar .nme-dl-tag{display:inline-block;font-size:.6875rem;border:1px solid currentColor;',
             '  border-radius:.2rem;padding:0 .25rem;margin-left:.35rem;opacity:.8;vertical-align:middle;}',
             // 「已下载」徽章：实心绿底，和描边的分类标签区分开，一眼能看出下没下过
+            // 行内进度条：每个文件行一条，并发下载各走各的不互相覆盖
+            '#nme-dl-bar .nme-dl-prog-wrap{margin-top:.45rem;}',
+            '#nme-dl-bar .nme-dl-prog{height:.25rem;background:rgba(255,255,255,.12);border-radius:.125rem;overflow:hidden;}',
+            '#nme-dl-bar .nme-dl-prog-bar{height:100%;width:0;background:#d34a4a;transition:width .25s ease;}',
+            '#nme-dl-bar .nme-dl-prog-text{font-size:.6875rem;opacity:.7;margin-top:.2rem;}',
             '#nme-dl-bar .nme-dl-done{display:inline-block;font-size:.6875rem;border-radius:.2rem;',
             '  padding:0 .3rem;margin-left:.35rem;vertical-align:middle;background:rgba(105,192,138,.18);',
             '  color:#69c08a;border:1px solid rgba(105,192,138,.45);}',
