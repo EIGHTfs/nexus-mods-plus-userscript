@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强（下载增强版）
 // @name:en      Nexus Mods Enhancer (Download Enhanced)
 // @namespace    nexusmods-enhancer-e8
-// @version      1.7.3
+// @version      1.7.4
 // @description  下载增强：按 mod 归档到「游戏名/Mod名」目录，断点续传、总进度条与单文件进度、已下载标记、图片单独下载、合集批量下载、脚本设置面板。另含原作的列表增强（80 条/页、9 种排序、中文筛选）、界面中文化与 AI 翻译分析。
 // @description:en  Download enhancements: per-mod folders under game/mod name, resumable downloads, total and per-file progress, downloaded markers, separate image download, collection batch download, settings panel. Also includes the original list enhancements (80 per page, 9 sort modes, Chinese filters), localized UI, and AI translation/analysis.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -37,7 +37,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.7.3';
+    const VERSION = '1.7.4';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -2356,6 +2356,7 @@
     //   · 断点记录只在 close 成功后更新，保证记录不超过磁盘实际大小
 
     const DL_SEGMENT_BYTES = 4 * 1024 * 1024;   // 每写满 4MB 落一次盘（快网速下按体积分块）
+    const DL_ABORT_ON_HIDDEN = false;           // 切后台是否主动中止下载（详见 init 处说明）
     const DL_SEGMENT_MS = 30 * 1000;            // 或距上次落盘满 30 秒（慢网速下按时间兜底，
                                                 // 否则 4MB 在 15KB/s 下要等好几分钟才落盘一次）
 
@@ -2651,7 +2652,14 @@
             try {
                 return await fn();
             } catch (err) {
-                if (!dlIsAbortError(err)) throw err;
+                if (!dlIsAbortError(err)) {
+                    // 非中止类错误：如果页面此刻不可见，多半是浏览器冻结导致的，
+                    // 按「暂停」处理等回前台重试，别把「网络错误」直接甩给用户。
+                    if (!document.hidden) throw err;
+                    say('下载被浏览器中断（页面在后台），回到前台会自动继续', 'warn');
+                    await dlWaitVisible();
+                    continue;
+                }
                 // 被切后台中止：等回到前台再重试，断点会让它接着下
                 say('已暂停：浏览器切到后台，回到前台会自动继续', 'warn');
                 await dlWaitVisible();
@@ -5519,9 +5527,16 @@
 
         // 页面切到后台时主动中止当前下载请求：
         // 等浏览器冻结页面再断，fetch 会以「网络错误」收场；主动断则断点齐整，回前台能接着下。
-        document.addEventListener('visibilitychange', function () {
-            if (document.hidden) dlAbortCurrentFetch();
-        });
+        // 切到后台时是否主动中止下载（仅代码常量，不对外暴露设置项）
+        //   false（默认）：不干预。桌面浏览器切标签页时页面并不冻结，下载照常继续；
+        //                  Android 切到别的 App 由浏览器冻结处理，回前台自动续传。
+        //   true          ：切走立即掐断，界面会显示「已暂停」而不是「网络错误」，
+        //                  代价是桌面切标签页也会中断。
+        if (DL_ABORT_ON_HIDDEN) {
+            document.addEventListener('visibilitychange', function () {
+                if (document.hidden) dlAbortCurrentFetch();
+            });
+        }
 
         const ctx = getContext();
         state.ctx = ctx;

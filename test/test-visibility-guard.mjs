@@ -155,6 +155,46 @@ async function makeContext() {
         [beforeVisible, executed, value], [false, true, 'x']);
 }
 
+
+/* ---------- 6. 页面在后台时的普通错误：按暂停处理，不甩给用户 ---------- */
+{
+    const { context, documentStub } = await makeContext();
+    const { dlRunWithVisibilityGuard } = context;
+    let calls = 0;
+    const logs = [];
+
+    const promise = dlRunWithVisibilityGuard(async () => {
+        calls++;
+        if (calls === 1) {
+            documentStub.hidden = true;
+            throw new Error('Failed to fetch');   // 冻结导致的失败，不是 AbortError
+        }
+        return 'recovered';
+    }, (text, kind) => logs.push(kind + ':' + text));
+
+    await new Promise((r) => setTimeout(r, 10));
+    documentStub.setHidden(false);
+
+    const value = await promise;
+    check('后台错误：按暂停处理并重试成功', [value, calls], ['recovered', 2]);
+    check('后台错误：有「页面在后台」提示',
+        logs.some((l) => l.includes('页面在后台')), true);
+}
+
+/* ---------- 7. 页面在前台时的同样错误，必须原样抛出 ---------- */
+{
+    const { context } = await makeContext();
+    let calls = 0;
+    let thrown = null;
+    try {
+        await context.dlRunWithVisibilityGuard(async () => {
+            calls++;
+            throw new Error('Failed to fetch');
+        });
+    } catch (e) { thrown = e.message; }
+    check('前台错误：不重试，原样抛出', [thrown, calls], ['Failed to fetch', 1]);
+}
+
 const failed = results.filter((r) => !r.ok);
 console.log('\n结果：' + (results.length - failed.length) + '/' + results.length + ' 通过');
 process.exit(failed.length ? 1 : 0);
