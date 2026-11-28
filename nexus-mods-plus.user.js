@@ -1539,6 +1539,76 @@
      * 三个分区：下载 / 界面 / AI，保存时分别写 CFG 与 aiCfg。
      * 分区样式复用原有 .nme-ai-modal 体系，只补了分区标题与勾选行。
      */
+    /** 收集设置面板里的控件引用，统一交给下面两个函数使用 */
+    function collectSettingsRefs(modal) {
+        const pick = function (id) { return modal.querySelector(id); };
+        return {
+            dirBtn: pick('#nme-cfg-dir'),
+            folder: pick('#nme-cfg-folder'),
+            imgLimit: pick('#nme-cfg-imglimit'),
+            gap: pick('#nme-cfg-gap'),
+            skipWait: pick('#nme-cfg-skipwait'),
+            pageSize: pick('#nme-cfg-pagesize'),
+            zhUI: pick('#nme-cfg-zhui'),
+            badges: pick('#nme-cfg-badges'),
+            url: pick('#nme-cfg-url'),
+            key: pick('#nme-cfg-key'),
+            model: pick('#nme-cfg-model'),
+            status: pick('#nme-cfg-status')
+        };
+    }
+
+    /** 把当前配置回填到表单控件（打开面板时调一次） */
+    function fillSettingsForm(refs) {
+        refs.folder.checked = typeof CFG.dlFolder === 'boolean' ? CFG.dlFolder : true;
+        refs.imgLimit.value = String(CFG.dlImgLimit == null ? 12 : CFG.dlImgLimit);
+        refs.gap.value = String(CFG.dlGap == null ? 5 : CFG.dlGap);
+        refs.skipWait.checked = !!CFG.skipWait;
+        [20, 40, 60, 80].forEach(function (size) {
+            const opt = document.createElement('option');
+            opt.value = String(size);
+            opt.textContent = size + ' 条';
+            if (Number(CFG.pageSize) === size) opt.selected = true;
+            refs.pageSize.appendChild(opt);
+        });
+        refs.zhUI.checked = !!CFG.zhUI;
+        refs.badges.checked = !!CFG.badges;
+        refs.url.value = aiCfg.url || AI_DEFAULT_URL;
+        refs.key.value = aiCfg.key || '';
+        refs.model.value = aiCfg.model || AI_DEFAULT_MODEL;
+    }
+
+    /**
+     * 从表单读值写回配置。
+     * 返回 true 表示有「影响列表渲染」的项变了，需要提示用户刷新页面。
+     */
+    function applySettingsFromForm(refs) {
+        const clampNumber = function (raw, min, max, fallback) {
+            const value = parseInt(raw, 10);
+            if (!Number.isFinite(value)) return fallback;
+            return Math.min(max, Math.max(min, value));
+        };
+        const oldPageSize = Number(CFG.pageSize);
+        const oldZhUI = !!CFG.zhUI;
+        const oldBadges = !!CFG.badges;
+
+        CFG.dlFolder = refs.folder.checked;
+        CFG.dlImgLimit = clampNumber(refs.imgLimit.value, 0, 50, 12);
+        CFG.dlGap = clampNumber(refs.gap.value, 1, 60, 5);
+        CFG.skipWait = refs.skipWait.checked;
+        CFG.pageSize = clampNumber(refs.pageSize.value, 20, 80, 80);
+        CFG.zhUI = refs.zhUI.checked;
+        CFG.badges = refs.badges.checked;
+        saveCfg();
+
+        aiCfg.url = refs.url.value.trim() || AI_DEFAULT_URL;
+        aiCfg.key = refs.key.value.trim();
+        aiCfg.model = refs.model.value.trim() || AI_DEFAULT_MODEL;
+        saveAiCfg();
+
+        return oldPageSize !== CFG.pageSize || oldZhUI !== CFG.zhUI || oldBadges !== CFG.badges;
+    }
+
     function openSettings(focusSection) {
         if ($('#nme-ai-cfg-modal')) return;
         const dlFolder = typeof CFG.dlFolder === 'boolean' ? CFG.dlFolder : true;
@@ -1547,37 +1617,10 @@
         document.body.appendChild(modal);
 
         const pick = function (id) { return modal.querySelector(id); };
-        const dirBtn = pick('#nme-cfg-dir');
-        const folderEl = pick('#nme-cfg-folder');
-        const imgLimitEl = pick('#nme-cfg-imglimit');
-        const gapEl = pick('#nme-cfg-gap');
-        const skipWaitEl = pick('#nme-cfg-skipwait');
-        const pageSizeEl = pick('#nme-cfg-pagesize');
-        const zhUIEl = pick('#nme-cfg-zhui');
-        const badgesEl = pick('#nme-cfg-badges');
-        const urlEl = pick('#nme-cfg-url');
-        const keyEl = pick('#nme-cfg-key');
-        const modelEl = pick('#nme-cfg-model');
-        const statusEl = pick('#nme-cfg-status');
-
-        // 回填当前值
-        folderEl.checked = dlFolder;
-        imgLimitEl.value = String(CFG.dlImgLimit == null ? 12 : CFG.dlImgLimit);
-        gapEl.value = String(CFG.dlGap == null ? 5 : CFG.dlGap);
-        skipWaitEl.checked = !!CFG.skipWait;
-        const sizeChoices = [20, 40, 60, 80];
-        sizeChoices.forEach(function (size) {
-            const opt = document.createElement('option');
-            opt.value = String(size);
-            opt.textContent = size + ' 条';
-            if (Number(CFG.pageSize) === size) opt.selected = true;
-            pageSizeEl.appendChild(opt);
-        });
-        zhUIEl.checked = !!CFG.zhUI;
-        badgesEl.checked = !!CFG.badges;
-        urlEl.value = aiCfg.url || AI_DEFAULT_URL;
-        keyEl.value = aiCfg.key || '';
-        modelEl.value = aiCfg.model || AI_DEFAULT_MODEL;
+        const refs = collectSettingsRefs(modal);
+        fillSettingsForm(refs);
+        const dirBtn = refs.dirBtn;
+        const statusEl = refs.status;
 
         const setStatus = function (text, kind) {
             statusEl.textContent = text || '';
@@ -1606,32 +1649,9 @@
         pick('#nme-cfg-cancel').addEventListener('click', close);
 
         pick('#nme-cfg-save').addEventListener('click', function () {
-            const clampNumber = function (raw, min, max, fallback) {
-                const value = parseInt(raw, 10);
-                if (!Number.isFinite(value)) return fallback;
-                return Math.min(max, Math.max(min, value));
-            };
-            const oldPageSize = Number(CFG.pageSize);
-            const oldZhUI = !!CFG.zhUI;
-            const oldBadges = !!CFG.badges;
-
-            CFG.dlFolder = folderEl.checked;
-            CFG.dlImgLimit = clampNumber(imgLimitEl.value, 0, 50, 12);
-            CFG.dlGap = clampNumber(gapEl.value, 1, 60, 5);
-            CFG.skipWait = skipWaitEl.checked;
-            CFG.pageSize = clampNumber(pageSizeEl.value, 20, 80, 80);
-            CFG.zhUI = zhUIEl.checked;
-            CFG.badges = badgesEl.checked;
-            saveCfg();
-
-            aiCfg.url = urlEl.value.trim() || AI_DEFAULT_URL;
-            aiCfg.key = keyEl.value.trim();
-            aiCfg.model = modelEl.value.trim() || AI_DEFAULT_MODEL;
-            saveAiCfg();
-
-            // 列表相关的设置只影响下一次渲染，直接告诉用户要刷新，别让人以为没生效
-            const needReload = oldPageSize !== CFG.pageSize || oldZhUI !== CFG.zhUI || oldBadges !== CFG.badges;
+            const needReload = applySettingsFromForm(refs);
             close();
+            // 列表相关的设置只影响下一次渲染，直接告诉用户要刷新，别让人以为没生效
             if (needReload) {
                 showToast('设置已保存', '界面相关项需刷新页面后生效', 'ok');
             } else {
@@ -1648,9 +1668,9 @@
                     maxTokens: 32,
                     temperature: 0,
                     cfg: {
-                        url: urlEl.value.trim() || AI_DEFAULT_URL,
-                        key: keyEl.value.trim(),
-                        model: modelEl.value.trim() || AI_DEFAULT_MODEL
+                        url: refs.url.value.trim() || AI_DEFAULT_URL,
+                        key: refs.key.value.trim(),
+                        model: refs.model.value.trim() || AI_DEFAULT_MODEL
                     }
                 });
                 setStatus('连接成功：' + text.trim().slice(0, 20), 'ok');
@@ -2324,11 +2344,8 @@
      * 从目标目录续写下载。返回 { fileName, totalBytes }。
      * 不依赖 OPFS/Worker，只要目录授权可用就能续。
      */
-    async function dlDownloadToDirResumable(dirHandle, fileNameHint, url, resumeKey, onProgress, log) {
-        const say = typeof log === 'function' ? log : function () {};
-        const record = resumeKey ? dlResumeLoad(resumeKey) : null;
-
-        // 1) 上次下到哪：记录里有文件名且目录里确实存在，才算可续
+    /** 读上次断点：记录里有文件名、且目录里确实存在该文件，才算可续 */
+    async function resolveResumeState(dirHandle, record) {
         let fileName = (record && record.fileName) || '';
         let offset = 0;
         if (fileName) {
@@ -2341,8 +2358,14 @@
                 offset = 0;
             }
         }
+        return { fileName: fileName, offset: offset };
+    }
 
-        // 2) 发请求：有断点就带 Range；挂可中止信号，切后台能主动掐断
+    /**
+     * 发出续传请求并解析响应头，返回校正后的偏移与总大小。
+     * 服务器给的起点不对、或 ETag 变了，都会把偏移归零（宁可重下也不能拼错文件）。
+     */
+    async function beginResumeFetch(url, offset, record, say) {
         dlVisibilityController = new AbortController();
         const headers = {};
         if (offset > 0) headers['Range'] = 'bytes=' + offset + '-';
@@ -2375,13 +2398,11 @@
             offset = 0;
             total = Number(response.headers.get('content-length') || 0);
         }
+        return { response: response, offset: offset, total: total };
+    }
 
-        if (!fileName) fileName = dlResolveFinalFileName(response, fileNameHint);
-        // 从头下载且目录里已有同名文件时换名，别盖掉已有文件
-        if (offset === 0) fileName = await dlUniquifyName(dirHandle, fileName);
-        if (offset > 0) say('从断点 ' + fmtSize(offset) + ' 继续下载', 'ok');
-
-        // 3) 分段写入，每段落盘一次
+    /** 分段写入目标目录，每满一段落盘一次并更新断点；返回实际写入字节数 */
+    async function writeSegmentedToDir(dirHandle, fileName, response, offset, total, resumeKey, onProgress) {
         let written = offset;
         let sinceClose = 0;
         let writable = await dlOpenWritable(dirHandle, fileName, offset);
@@ -2420,6 +2441,33 @@
             }
             throw streamError;
         }
+        return written;
+    }
+
+    async function dlDownloadToDirResumable(dirHandle, fileNameHint, url, resumeKey, onProgress, log) {
+        const say = typeof log === 'function' ? log : function () {};
+        const record = resumeKey ? dlResumeLoad(resumeKey) : null;
+
+        // 1) 上次下到哪
+        const state = await resolveResumeState(dirHandle, record);
+        let fileName = state.fileName;
+        let offset = state.offset;
+
+        // 2) 发请求并解析响应（服务器起点不符 / ETag 变化都会把偏移归零）
+        const fetched = await beginResumeFetch(url, offset, record, say);
+        const response = fetched.response;
+        offset = fetched.offset;
+        const total = fetched.total;
+
+        if (!fileName) fileName = dlResolveFinalFileName(response, fileNameHint);
+        // 从头下载且目录里已有同名文件时换名，别盖掉已有文件
+        if (offset === 0) fileName = await dlUniquifyName(dirHandle, fileName);
+        if (offset > 0) say('从断点 ' + fmtSize(offset) + ' 继续下载', 'ok');
+
+        // 3) 分段写入，每段落盘一次
+        const written = await writeSegmentedToDir(
+            dirHandle, fileName, response, offset, total, resumeKey, onProgress
+        );
 
         if (!written) {
             await dlRemoveEntry(dirHandle, fileName);
@@ -3666,14 +3714,16 @@
         if (stop) stop.disabled = !running;
     }
 
-    async function startCollectionDownload(ctx) {
-        openFab(FAB_SEC_DL);
-        if (state.dlRunning) return;
-        if (!state.dlQueue.length) { await loadCollection(ctx); }
+    /**
+     * 合集批量下载的准备阶段：校验、用户确认、目录授权、读取历史。
+     * 返回 null 表示条件不满足或用户取消，调用方直接结束。
+     * 抽出来是为了让 startCollectionDownload 只保留「循环 + 状态推进」这条主线。
+     */
+    async function prepareCollectionQueue(ctx) {
+        if (state.dlQueue.length === 0) await loadCollection(ctx);
         const queue = state.dlQueue || [];
-        if (!queue.length) { dlStatus('合集里没有可下载的文件', 'err'); return; }
-
-        if (!isLoggedIn()) { dlStatus('请先登录 Nexus Mods 账号', 'err'); return; }
+        if (!queue.length) { dlStatus('合集里没有可下载的文件', 'err'); return null; }
+        if (!isLoggedIn()) { dlStatus('请先登录 Nexus Mods 账号', 'err'); return null; }
 
         const ok = window.confirm(
             '即将逐个请求下载合集里的 ' + queue.length + ' 个文件。\n\n' +
@@ -3682,7 +3732,7 @@
             '· 批量下载可能不符合 Nexus 的使用条款，请自行判断。\n\n' +
             '继续？'
         );
-        if (!ok) return;
+        if (!ok) return null;
 
         // 目录授权：confirm 的「确定」同样是一次用户激活，趁激活窗口还在先确认
         if (CFG.dlFolder && dlHasArchiveChannel()) {
@@ -3700,7 +3750,57 @@
             const skip = window.confirm('历史里已有 ' + history[key].length + ' 个已下载文件。\n\n确定 = 跳过它们，只下缺的；取消 = 重新下载全部。');
             if (!skip) { history[key] = []; dlHistorySave(history); }
         }
-        const done = history[key] || [];
+        return { queue: queue, history: history, key: key, done: history[key] || [] };
+    }
+
+    /**
+     * 下载合集里的一个文件（只管下载动作本身，不碰历史与状态）。
+     * 返回 { ok, logText } 或 { ok:false, msg, fatal }，由调用方决定如何推进状态。
+     */
+    async function downloadCollectionItem(f) {
+        try {
+            if (CFG.dlFolder && dlHasArchiveChannel()) {
+                const result = await archiveDownload({
+                    domain: f.domain,
+                    modId: f.modId,
+                    fileId: f.fileId,
+                    gameId: f.gameId,
+                    fileName: f.name,
+                    modTitle: f.modName,
+                    gameName: f.gameName,
+                    pictureUrl: f.pictureUrl,
+                    ctxMode: 'collection',
+                    rootHandle: state.dlRootHandle,
+                    rootReason: state.dlRootReason,
+                    log: function (text, kind) { dlLog('    ' + text, kind); }
+                });
+                return {
+                    ok: true,
+                    logText: '已保存到 ' + result.folder + '/' + result.file +
+                        (result.images ? '（+' + result.images + ' 图）' : '')
+                };
+            }
+            const resolved = await resolveWithRetry(f.domain, f.modId, f.fileId, f.gameId);
+            triggerDownload(resolved.url, f.name);
+            return { ok: true, logText: '已开始下载：' + f.name };
+        } catch (e) {
+            return {
+                ok: false,
+                fatal: !!(e && e.fatal),
+                msg: (e && e.message) || String(e)
+            };
+        }
+    }
+
+    async function startCollectionDownload(ctx) {
+        openFab(FAB_SEC_DL);
+        if (state.dlRunning) return;
+        const prep = await prepareCollectionQueue(ctx);
+        if (!prep) return;
+        const queue = prep.queue;
+        const history = prep.history;
+        const key = prep.key;
+        const done = prep.done;
 
         state.dlRunning = true;
         state.dlStop = false;
@@ -3745,51 +3845,22 @@
             if (state.dlStop) break;
 
             dlStatus('[' + (i + 1) + '/' + queue.length + '] 正在获取：' + f.name, 'busy');
-            try {
-                if (CFG.dlFolder && dlHasArchiveChannel()) {
-                    const result = await archiveDownload({
-                        domain: f.domain,
-                        modId: f.modId,
-                        fileId: f.fileId,
-                        gameId: f.gameId,
-                        fileName: f.name,
-                        modTitle: f.modName,
-                        gameName: f.gameName,
-                        pictureUrl: f.pictureUrl,
-                        ctxMode: 'collection',
-                        rootHandle: state.dlRootHandle,
-                        rootReason: state.dlRootReason,
-                        log: function (text, kind) { dlLog('    ' + text, kind); }
-                    });
-                    markDl(f.fileId);
-                    done.push(f.fileId);
-                    history[key] = done;
-                    dlHistorySave(history);
-                    state.dlCount++;
-                    state.dlDone++;
-                    fails = 0;
-                    dlLog('[' + (i + 1) + '/' + queue.length + '] 已保存到 ' + result.folder + '/' + result.file +
-                        (result.images ? '（+' + result.images + ' 图）' : ''), 'ok');
-                } else {
-                    const resolved = await resolveWithRetry(f.domain, f.modId, f.fileId, f.gameId);
-                    triggerDownload(resolved.url, f.name);
-                    markDl(f.fileId);
-                    done.push(f.fileId);
-                    history[key] = done;
-                    dlHistorySave(history);
-                    state.dlCount++;
-                    state.dlDone++;
-                    fails = 0;
-                    dlLog('[' + (i + 1) + '/' + queue.length + '] 已开始下载：' + f.name, 'ok');
-                }
-            } catch (e) {
-                const msg = (e && e.message) || String(e);
-                const fatal = !!(e && e.fatal);
+            const result = await downloadCollectionItem(f);
+            if (result.ok) {
+                markDl(f.fileId);
+                done.push(f.fileId);
+                history[key] = done;
+                dlHistorySave(history);
+                state.dlCount++;
+                state.dlDone++;
+                fails = 0;
+                dlLog('[' + (i + 1) + '/' + queue.length + '] ' + result.logText, 'ok');
+            } else {
                 fails++;
-                dlLog('[' + (i + 1) + '/' + queue.length + '] 失败：' + f.name + ' — ' + msg, 'err');
-                dlStatus(msg, 'err');
-                if (fatal || fails >= 3) {
-                    dlLog(fatal ? '遇到「' + msg + '」，已停止批量下载' : '连续 3 个文件失败，已停止批量下载', 'err');
+                dlLog('[' + (i + 1) + '/' + queue.length + '] 失败：' + f.name + ' — ' + result.msg, 'err');
+                dlStatus(result.msg, 'err');
+                if (result.fatal || fails >= 3) {
+                    dlLog(result.fatal ? '遇到「' + result.msg + '」，已停止批量下载' : '连续 3 个文件失败，已停止批量下载', 'err');
                     state.dlStop = true;
                     break;
                 }
@@ -4374,6 +4445,44 @@
             .replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
+    /**
+     * 工具条里与「列表筛选」无关的额外入口：中文找游戏、AI 配置、AI 解读，
+     * 以及「关键词里出现中文就转去中文找游戏」的联动。
+     * 从 bindPanel 里拆出来：这块自成功能，与每页/排序/筛选那套控件没有耦合。
+     */
+    function bindToolbarExtraControls(panel, on) {
+        // —— 中文找游戏 ——
+        const cn = panel.querySelector('#nme-cn');
+        if (cn) {
+            cn.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') { e.preventDefault(); runCnGameSearch(); }
+            });
+        }
+        on('#nme-cn-go', 'click', runCnGameSearch);
+        on('#nme-ai-cfg2', 'click', openAiSettings);
+        on('#nme-ai-digest', 'click', runPageDigest);
+
+        // 关键词里出现中文时，顺手提示走「中文找游戏」
+        const kwEl = panel.querySelector('#nme-kw');
+        if (kwEl && cn) {
+            kwEl.addEventListener('input', function () {
+                if (CJK_RE.test(this.value)) {
+                    cn.value = this.value;
+                    setCnMsg('中文关键词在 N 网搜不到，改按「中文找游戏」解析', 'warn');
+                } else {
+                    setCnMsg('', '');
+                }
+            });
+            kwEl.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' && CJK_RE.test(this.value)) {
+                    e.preventDefault();
+                    cn.value = this.value;
+                    runCnGameSearch();
+                }
+            });
+        }
+    }
+
     function bindPanel(panel) {
         const on = (sel, ev, fn) => {
             const el = panel.querySelector(sel);
@@ -4463,36 +4572,7 @@
             setView(CFG.view === 'enhanced' ? 'native' : 'enhanced');
         });
 
-        // —— 中文找游戏 ——
-        const cn = panel.querySelector('#nme-cn');
-        if (cn) {
-            cn.addEventListener('keydown', function (e) {
-                if (e.key === 'Enter') { e.preventDefault(); runCnGameSearch(); }
-            });
-        }
-        on('#nme-cn-go', 'click', runCnGameSearch);
-        on('#nme-ai-cfg2', 'click', openAiSettings);
-        on('#nme-ai-digest', 'click', runPageDigest);
-
-        // 关键词里出现中文时，顺手提示走「中文找游戏」
-        const kwEl = panel.querySelector('#nme-kw');
-        if (kwEl && cn) {
-            kwEl.addEventListener('input', function () {
-                if (CJK_RE.test(this.value)) {
-                    cn.value = this.value;
-                    setCnMsg('中文关键词在 N 网搜不到，改按「中文找游戏」解析', 'warn');
-                } else {
-                    setCnMsg('', '');
-                }
-            });
-            kwEl.addEventListener('keydown', function (e) {
-                if (e.key === 'Enter' && CJK_RE.test(this.value)) {
-                    e.preventDefault();
-                    cn.value = this.value;
-                    runCnGameSearch();
-                }
-            });
-        }
+        bindToolbarExtraControls(panel, on);
     }
 
     let toastTimer = null;
