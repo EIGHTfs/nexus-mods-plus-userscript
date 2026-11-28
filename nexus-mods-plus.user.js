@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强（下载增强版）
 // @name:en      Nexus Mods Enhancer (Download Enhanced)
 // @namespace    nexusmods-enhancer-e8
-// @version      1.7.0
+// @version      1.7.1
 // @description  下载增强：按 mod 归档到「游戏名/Mod名」目录，断点续传、总进度条与单文件进度、已下载标记、图片单独下载、合集批量下载、脚本设置面板。另含原作的列表增强（80 条/页、9 种排序、中文筛选）、界面中文化与 AI 翻译分析。
 // @description:en  Download enhancements: per-mod folders under game/mod name, resumable downloads, total and per-file progress, downloaded markers, separate image download, collection batch download, settings panel. Also includes the original list enhancements (80 per page, 9 sort modes, Chinese filters), localized UI, and AI translation/analysis.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -37,7 +37,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.7.0';
+    const VERSION = '1.7.1';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -2282,7 +2282,17 @@
      * 正常情况不会触发——N 网 CDN 真名自带 fileId 与版本；
      * 只有拿不到真名、退回兜底名时，同 mod 的同名文件才会撞名。
      */
-    async function dlUniquifyName(dirHandle, fileName) {
+    /**
+     * 目标目录里若已有同名文件，生成不冲突的名字（`xxx (1).zip`）。
+     * 与浏览器原生下载行为一致：不覆盖用户的已有文件。
+     *
+     * allowOverwrite 用于「这是我们自己上次没下完的文件」的情况：
+     * 浏览器关掉重开后，续传可能因为链接换了、服务器忽略 Range 等原因归零重下，
+     * 此时目录里躺着的半截文件是残次品，应当直接覆盖，
+     * 否则会被当成「用户的文件」保护起来，多出一个 xxx (1).zip。
+     * 判定交给调用方（依据断点记录），这里只按传入的意愿执行。
+     */
+    async function dlUniquifyName(dirHandle, fileName, allowOverwrite) {
         // 返回 'free'（不存在）/ 'empty'（存在但是 0 字节）/ 'taken'（存在且有内容）
         const probe = async function (name) {
             try {
@@ -2298,6 +2308,7 @@
         // 直接复用这个名字覆盖它，否则每次重试都会多出一个「xxx (1).zip」，
         // 空壳越攒越多，还让人以为下载出了两种文件。
         if (first === 'free' || first === 'empty') return fileName;
+        if (allowOverwrite) return fileName;   // 自己的未完成文件，覆盖它继续
         const dot = fileName.lastIndexOf('.');
         const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
         const ext = dot > 0 ? fileName.slice(dot) : '';
@@ -2460,8 +2471,15 @@
         const total = fetched.total;
 
         if (!fileName) fileName = dlResolveFinalFileName(response, fileNameHint);
-        // 从头下载且目录里已有同名文件时换名，别盖掉已有文件
-        if (offset === 0) fileName = await dlUniquifyName(dirHandle, fileName);
+        // 从头下载且目录里已有同名文件时换名，别盖掉用户已有的文件。
+        // 例外：断点记录指向同一个文件、且记录显示确实没下完（偏移小于总大小），
+        // 说明那个半截文件是我们自己上次留下的残次品，直接覆盖继续，
+        // 不能加 (1)——否则浏览器重开后每次都会多出一个 xxx (1).zip。
+        if (offset === 0) {
+            const isOwnIncomplete = !!(record && record.fileName === fileName &&
+                Number(record.total) > 0 && Number(record.offset) < Number(record.total));
+            fileName = await dlUniquifyName(dirHandle, fileName, isOwnIncomplete);
+        }
         if (offset > 0) say('从断点 ' + fmtSize(offset) + ' 继续下载', 'ok');
 
         // 3) 分段写入，每段落盘一次
