@@ -229,6 +229,22 @@ check('文件名：同名的两个版本兜底名不同（靠 fileId 区分）',
     ],
     ['Same-41-1-0-0.zip', 'Same-1555-1-1.zip']);
 
+
+// ---------- 分段落盘的双阈值（体积 或 时间，任一满足） ----------
+{
+    const ctx2 = vm.createContext({});
+    const consts2 = "const DL_SEGMENT_BYTES = 4*1024*1024;\nconst DL_SEGMENT_MS = 30*1000;\n";
+    vm.runInContext(consts2 + extractFunction('shouldFlushSegment'), ctx2);
+    const should = ctx2.shouldFlushSegment;
+    const MB = 1024 * 1024;
+    check('落盘：写满 4MB 立即落（时间未到）', should(4 * MB, 0, 1000), true);
+    check('落盘：不足 4MB 且未到 30 秒 → 不落', should(1 * MB, 0, 1000), false);
+    check('落盘：不足 4MB 但满 30 秒 → 落（慢网速兜底）', should(400 * 1024, 0, 30000), true);
+    check('落盘：刚好 30 秒边界 → 落', should(1, 0, 30000), true);
+    check('落盘：29.9 秒尚未到 → 不落', should(1, 0, 29900), false);
+    check('落盘：超过 4MB 也只有一个 true（不重复）', should(10 * MB, Date.now(), Date.now()), true);
+}
+
 const failed = results.filter((r) => !r.ok);
 console.log('\n结果：' + (results.length - failed.length) + '/' + results.length + ' 通过');
 process.exit(failed.length ? 1 : 0);

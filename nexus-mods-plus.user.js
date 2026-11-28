@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强（下载增强版）
 // @name:en      Nexus Mods Enhancer (Download Enhanced)
 // @namespace    nexusmods-enhancer-e8
-// @version      1.7.2
+// @version      1.7.3
 // @description  下载增强：按 mod 归档到「游戏名/Mod名」目录，断点续传、总进度条与单文件进度、已下载标记、图片单独下载、合集批量下载、脚本设置面板。另含原作的列表增强（80 条/页、9 种排序、中文筛选）、界面中文化与 AI 翻译分析。
 // @description:en  Download enhancements: per-mod folders under game/mod name, resumable downloads, total and per-file progress, downloaded markers, separate image download, collection batch download, settings panel. Also includes the original list enhancements (80 per page, 9 sort modes, Chinese filters), localized UI, and AI translation/analysis.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -37,7 +37,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.7.2';
+    const VERSION = '1.7.3';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -2355,7 +2355,9 @@
     //     段内数据才真正进磁盘；中断最多丢最后一段，下次从上次 close 的偏移继续
     //   · 断点记录只在 close 成功后更新，保证记录不超过磁盘实际大小
 
-    const DL_SEGMENT_BYTES = 4 * 1024 * 1024;   // 每写满 4MB 落一次盘
+    const DL_SEGMENT_BYTES = 4 * 1024 * 1024;   // 每写满 4MB 落一次盘（快网速下按体积分块）
+    const DL_SEGMENT_MS = 30 * 1000;            // 或距上次落盘满 30 秒（慢网速下按时间兜底，
+                                                // 否则 4MB 在 15KB/s 下要等好几分钟才落盘一次）
 
     /** 打开可续写的 writable：offset>0 时保留已有内容并定位到末尾 */
     async function dlOpenWritable(dirHandle, fileName, offset) {
@@ -2427,9 +2429,21 @@
     }
 
     /** 分段写入目标目录，每满一段落盘一次并更新断点；返回实际写入字节数 */
+    /**
+     * 这一段是否该落盘了。
+     * 两个条件任一满足即可：写满 4MB（快网速下按体积分块，减少 close 次数），
+     * 或距上次落盘满 30 秒（慢网速下 4MB 要等几分钟，按时间兜底把中断损失压到半分钟）。
+     * 抽成纯函数便于单测这两个条件的边界。
+     */
+    function shouldFlushSegment(sinceClose, lastCloseAt, now) {
+        if (sinceClose >= DL_SEGMENT_BYTES) return true;
+        return (now - lastCloseAt) >= DL_SEGMENT_MS;
+    }
+
     async function writeSegmentedToDir(dirHandle, fileName, response, offset, total, resumeKey, onProgress) {
         let written = offset;
         let sinceClose = 0;
+        let lastCloseAt = Date.now();
         let writable = await dlOpenWritable(dirHandle, fileName, offset);
         try {
             if (!response.body || typeof response.body.getReader !== 'function') {
@@ -2450,11 +2464,17 @@
                     written += value.byteLength;
                     sinceClose += value.byteLength;
                     if (typeof onProgress === 'function') onProgress({ loaded: written, total: total });
-                    if (sinceClose >= DL_SEGMENT_BYTES) {
+                    // 两个条件任一满足就落盘：
+                    //   · 写满 4MB —— 快网速下按体积分块，避免 close 次数过多；
+                    //   · 距上次落盘超过 30 秒 —— 慢网速下 4MB 要等好几分钟，
+                    //     只靠体积会让「中断一次丢几分钟进度」，用时间兜底把损失压到半分钟。
+                    const now = Date.now();
+                    if (shouldFlushSegment(sinceClose, lastCloseAt, now)) {
                         await writable.close();
                         if (resumeKey) dlResumeSave(resumeKey, { fileName: fileName, offset: written, total: total });
                         writable = await dlOpenWritable(dirHandle, fileName, written);
                         sinceClose = 0;
+                        lastCloseAt = now;
                     }
                 }
                 await writable.close();
