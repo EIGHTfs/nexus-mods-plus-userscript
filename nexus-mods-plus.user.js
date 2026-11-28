@@ -2,7 +2,7 @@
 // @name         Nexus Mods 增强（下载增强版）
 // @name:en      Nexus Mods Enhancer (Download Enhanced)
 // @namespace    nexusmods-enhancer-e8
-// @version      1.7.1
+// @version      1.7.2
 // @description  下载增强：按 mod 归档到「游戏名/Mod名」目录，断点续传、总进度条与单文件进度、已下载标记、图片单独下载、合集批量下载、脚本设置面板。另含原作的列表增强（80 条/页、9 种排序、中文筛选）、界面中文化与 AI 翻译分析。
 // @description:en  Download enhancements: per-mod folders under game/mod name, resumable downloads, total and per-file progress, downloaded markers, separate image download, collection batch download, settings panel. Also includes the original list enhancements (80 per page, 9 sort modes, Chinese filters), localized UI, and AI translation/analysis.
 // @icon         data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><rect x='3' y='3' width='122' height='122' rx='26' fill='%2316161B' stroke='%23302F38' stroke-width='2'/><rect x='26' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><rect x='73' y='32' width='15' height='64' rx='2' fill='%23F5F3EE'/><path d='M40 32h15L73 96H58z' fill='%23DA8E35'/><path d='M102 12l3 9 9 3-9 3-3 9-3-9-9-3 9-3z' fill='%23D34A4A'/></svg>
@@ -37,7 +37,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.7.1';
+    const VERSION = '1.7.2';
     const API = 'https://api.nexusmods.com/v2/graphql';
     const LOG_PREFIX = '[N网增强]';
     const AI_DEFAULT_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -84,6 +84,15 @@
     // ==================== 通用工具 ====================
 
     const $ = (sel, root) => (root || document).querySelector(sel);
+
+    /**
+     * 页面真实 window（unsafeWindow）。
+     * 账号、File System Access、indexedDB 这些能力挂在页面上下文里，
+     * 沙箱里的 window 可能是代理对象，读不到站点自己写的全局变量（如 USER_ID）。
+     */
+    function pageWin() {
+        return (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+    }
 
     /**
      * 创建元素的一行写法：el('button', { id: 'x', className: 'y', text: '下载' }, [子节点…])
@@ -1158,7 +1167,10 @@
 
         dock = document.createElement('div');
         dock.id = 'nme-dock';
-        document.body.appendChild(dock);
+        // 挂到 <html> 而不是 <body>：Nexus 是 Next.js 应用，React 回退重渲染时
+        // 会把 body 下的内容整棵换掉（实测浮动坞 48ms 内就消失），
+        // html 的直接子节点不在 React 管辖范围内，挂这里更稳。
+        (document.documentElement || document.body).appendChild(dock);
 
         // 点击坞以外：收起浮动面板
         document.addEventListener('click', function (e) {
@@ -1753,7 +1765,9 @@
     function isLoggedIn() {
         // 页面未水合时 USER_ID 与登录链接都可能不存在，无法可靠判断；
         // 只有能确定 USER_ID 时才拦截，其余交给接口 401/403 或文件页的登录链接提示。
-        if (typeof window.USER_ID !== 'undefined') return !!window.USER_ID;
+        // 注意必须读页面真实 window：USER_ID 是站点写在页面上下文里的，沙箱 window 通常拿不到。
+        const userId = pageWin().USER_ID;
+        if (typeof userId !== 'undefined') return !!userId;
         return true;
     }
 
@@ -2670,9 +2684,19 @@
         return !!(dlPickerApi() || dlHasDownloadApi());
     }
 
-    /** 当前脚本管理器是否提供 GM_download（没声明 @grant 或管理器不支持时为 undefined） */
+    /** 当前脚本管理器名（GM_info.scriptHandler），用于按实现差异决定通道可用性 */
+    function dlManagerName() {
+        try {
+            return (typeof GM_info !== 'undefined' && GM_info && GM_info.scriptHandler) || '';
+        } catch (e) { return ''; }
+    }
+
+    /** 当前脚本管理器是否提供可用的 GM_download */
     function dlHasDownloadApi() {
-        return typeof GM_download === 'function';
+        if (typeof GM_download !== 'function') return false;
+        // Violentmonkey 的实现是 fetch + blob 再转下载：几百 MB 的 mod 会整包进内存，
+        // 这种环境一律不用它，让调用方退回原生 a[download] 或文件系统通道。
+        return !/violentmonkey/i.test(dlManagerName());
     }
 
     /**
@@ -2908,10 +2932,18 @@
                 opts.onProgress({ loaded: loaded, total: total });
                 return;
             }
-            // 合集批量：没有行内进度条，进度只能写进日志
+            // 合集批量：没有行内进度条
             const percent = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
-            log('下载中 ' + fmtProgressBar(loaded, total) + ' ' +
-                (total ? percent + '% · ' + fmtSize(loaded) + ' / ' + fmtSize(total) : fmtSize(loaded)), 'busy');
+            const text = '下载中 ' + fmtProgressBar(loaded, total) + ' ' +
+                (total ? percent + '% · ' + fmtSize(loaded) + ' / ' + fmtSize(total) : fmtSize(loaded));
+            // 优先交给调用方的状态行回调（同一行反复覆盖）；
+            // 绝不能走日志：合集下载时每 500ms 写一行，80 行日志区几十秒就被进度冲光，
+            // 真正的成功/失败记录全被埋掉。
+            if (typeof opts.onProgressText === 'function') {
+                opts.onProgressText(text);
+                return;
+            }
+            log(text, 'busy');
         });
         const putOptions = {
             rootHandle: opts.rootHandle,
@@ -3790,6 +3822,9 @@
                     ctxMode: 'collection',
                     rootHandle: state.dlRootHandle,
                     rootReason: state.dlRootReason,
+                    // 进度写状态行（同一行覆盖），日志只留「保存到 / 失败」这类真实事件，
+                    // 否则批量下载时进度行会把日志区冲光
+                    onProgressText: function (text) { dlStatus(text, 'busy'); },
                     log: function (text, kind) { dlLog('    ' + text, kind); }
                 });
                 return {
@@ -5470,6 +5505,10 @@
 
         const ctx = getContext();
         state.ctx = ctx;
+        state.routeKey = ctxKey(ctx);
+
+        // 站内路由接管：必须在首屏挂载前开启，否则第一次客户端跳转会漏掉
+        watchRoute();
 
         // React 站点（Next.js）服务端渲染英文文本后再水合。
         // 在水合提交前改写文本或插入节点，都会让 React 判定「服务端与客户端不一致」，
@@ -5487,12 +5526,22 @@
     }
 
     /** 水合完成后（或非 React 站点立即）挂载界面 */
-    function bootUi(ctx) {
-        // 右下角浮动胶囊（所有页面常驻，不依赖增强视图面板）
-        mountCapsule();
+    /** 当前页面的身份键：详情页按 modId、合集页按 slug 区分，列表页按游戏区分 */
+    function ctxKey(ctx) {
+        if (!ctx) return 'none';
+        if (ctx.mode === 'detail') return 'detail:' + (ctx.domain || '') + ':' + (ctx.modId || 0);
+        if (ctx.mode === 'collection') return 'collection:' + (ctx.domain || '') + ':' + (ctx.collectionSlug || '');
+        return ctx.mode + ':' + (ctx.domain || '');
+    }
 
-        if (CFG.zhUI) translateTree(document.body);
-        enhanceFilterClick();
+    // 每次挂载发一个令牌：路由再变时旧的重试循环必须自己停，
+    // 否则 250ms × 40 次的补挂会把上一页的面板塞进新页面。
+    let mountToken = 0;
+
+    /** 按页面类型挂载入口（首次启动与路由变化都走这里） */
+    function mountForContext(ctx) {
+        const token = ++mountToken;
+        const alive = function () { return token === mountToken; };
 
         if (ctx) {
             if (ctx.mode === 'detail') {
@@ -5500,6 +5549,7 @@
                 mountFab(ctx);
                 let tries = 0;
                 const tryMountAi = function () {
+                    if (!alive()) return;
                     tries++;
                     mountDetailAi(ctx);
                     mountDetailDownload(ctx);
@@ -5511,6 +5561,7 @@
                 mountFab(ctx);
                 let tries = 0;
                 const tryMountColl = function () {
+                    if (!alive()) return;
                     tries++;
                     if ($('#nme-dl-bar')) return;
                     mountCollectionDownload(ctx);
@@ -5521,6 +5572,7 @@
                 // 等原生列表渲染出第一张卡片再挂载增强视图（需要克隆原生卡片做样式模板）
                 let tries = 0;
                 const tryMount = function () {
+                    if (!alive()) return;
                     tries++;
                     if ($('#nme-panel')) return;
                     mountEnhanced();
@@ -5528,18 +5580,114 @@
                 };
                 tryMount();
             }
+            return;
         }
 
-        if (!ctx) {
-            // 下载历史页：表是异步渲染的，等它出现
-            let triesHist = 0;
-            const tryHist = function () {
-                triesHist++;
-                if (mountHistoryCheck()) return;
-                if (triesHist < 40 && /\/users\/myaccount/i.test(location.pathname)) setTimeout(tryHist, 250);
-            };
-            tryHist();
+        // 下载历史页：表是异步渲染的，等它出现
+        let triesHist = 0;
+        const tryHist = function () {
+            if (!alive()) return;
+            triesHist++;
+            if (mountHistoryCheck()) return;
+            if (triesHist < 40 && /\/users\/myaccount/i.test(location.pathname)) setTimeout(tryHist, 250);
+        };
+        tryHist();
+    }
+
+    /** 清掉上一页挂载的按钮、浮层与增强面板（路由变化时先拆后建） */
+    function unmountContextUi() {
+        ['nme-fab-btns', 'nme-fab-card', 'nme-dl-bar', 'nme-ai-bar', 'nme-panel']
+            .forEach(function (id) {
+                const el = document.getElementById(id);
+                if (el) el.remove();
+            });
+        const dock = document.getElementById('nme-dock');
+        if (dock) dock.removeAttribute('data-fab-mode');
+        if (state.io) {
+            try { state.io.disconnect(); } catch (e) { /* 已断开则忽略 */ }
+            state.io = null;
         }
+    }
+
+    /** 重置页面级状态；正在跑的批量下载会被要求停下，避免离开页面后继续空跑 */
+    function resetPageState() {
+        state.offset = 0;
+        state.total = 0;
+        state.loaded = 0;
+        state.loading = false;
+        state.done = false;
+        state.error = '';
+        state.retried = false;
+        state.mods = [];
+        state.modCache = null;
+        state.modLoading = null;
+        state.dlFiles = [];
+        state.dlGameId = 0;
+        state.dlQueue = [];
+        state.dlTotal = 0;
+        state.dlRootHandle = null;
+        state.dlRootReason = '';
+        state.dlViewerDownloaded = false;
+    }
+
+    let routeWatcherOn = false;
+    let lastHref = '';
+
+    /**
+     * 接管站内路由（Next.js App Router）。
+     * pushState 不触发 popstate，也没有跨版本可靠的事件，所以：
+     * popstate + 800ms 字符串比对（只在 href 变化时才做后续工作）。
+     *
+     * 没有这段时，从 mod A 跳到 mod B 只是客户端换内容，脚本不知道，
+     * 下载面板会一直显示上一个 mod 的文件列表。
+     */
+    function watchRoute() {
+        if (routeWatcherOn) return;
+        routeWatcherOn = true;
+        lastHref = location.href;
+        window.addEventListener('popstate', onRouteMaybeChanged);
+        setInterval(onRouteMaybeChanged, 800);
+    }
+
+    function onRouteMaybeChanged() {
+        if (location.href === lastHref) return;
+        lastHref = location.href;
+        // 水合还没完成：交给 bootUi 那一轮，别在服务端文本上动手
+        if (state.reactApp && !state.hydrated) return;
+        applyRouteChange();
+    }
+
+    function applyRouteChange() {
+        const ctx = getContext();
+        const key = ctxKey(ctx);
+        if (key === state.routeKey) return;
+        state.routeKey = key;
+
+        // 离开合集页时停掉批量队列：否则会在新页面上继续空跑
+        if (state.dlRunning) {
+            state.dlStop = true;
+            showToast('已离开合集页', '批量下载会在当前文件结束后停止，已完成的记入历史', 'warn');
+        }
+        state.ctx = ctx;
+        unmountContextUi();
+        resetPageState();
+        mountCapsule();
+        closeFab();
+        mountForContext(ctx);
+        if (CFG.zhUI) translateTree(document.body);
+        if (CFG.badges) decorateNativeTiles(document.body);
+        enhanceFilterClick();
+    }
+
+    function bootUi(ctx) {
+        // 右下角浮动胶囊（所有页面常驻，不依赖增强视图面板）
+        mountCapsule();
+
+        if (CFG.zhUI) translateTree(document.body);
+        enhanceFilterClick();
+
+        // 按页面类型挂载（首次启动与站内路由变化都走同一入口）
+        mountForContext(ctx);
 
         // 站点是 React 客户端渲染，后续内容需要持续处理（中文化 + 徽章 + 详情页 AI 条）
         const obs = new MutationObserver(debounce(function () {
@@ -5551,6 +5699,9 @@
             if (CFG.zhUI) translateTree(document.body);
             if (CFG.badges) decorateNativeTiles(document.body);
             enhanceFilterClick();
+            // 浮动坞与各面板都可能被 React 回退重渲染清掉，每轮确认一次，丢了就重建
+            mountCapsule();
+            if (state.ctx) mountFab(state.ctx);
             if (state.ctx && state.ctx.mode === 'detail') {
                 mountDetailAi(state.ctx);
                 mountDetailDownload(state.ctx);
